@@ -73,14 +73,19 @@ const codigoEsquema = z.object({ codigo: z.string().trim().min(6).max(10) });
 const permisosEsquema = z
   .object(Object.fromEntries(PERMISOS.map((p) => [p, z.boolean().optional()])))
   .partial();
+/** Fecha hasta la que la persona puede entrar; null = sin límite. */
+const venceEsquema = z.string().datetime({ offset: true }).nullable();
 const nuevoUsuarioEsquema = z.object({
   email: z.string().trim().toLowerCase().email().max(254),
   nombre: z.string().trim().max(120).default(''),
   permisos: permisosEsquema.default({}),
+  vence_en: venceEsquema.optional(),
 });
 const cambioUsuarioEsquema = z.object({
   activo: z.boolean().optional(),
   nombre: z.string().trim().max(120).optional(),
+  email: z.string().trim().toLowerCase().email().max(254).optional(),
+  vence_en: venceEsquema.optional(),
   permisos: permisosEsquema.optional(),
   restablecer_contrasena: z.boolean().optional(),
   quitar_mfa: z.boolean().optional(),
@@ -149,6 +154,10 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
         );
       }
       return reply.code(401).send({ error: 'credenciales_invalidas' });
+    }
+    // Solo se informa del vencimiento a quien sabe la contraseña
+    if (u.vence_en && new Date(u.vence_en) <= new Date()) {
+      return reply.code(403).send({ error: 'cuenta_vencida' });
     }
     await pool.query(
       'update usuarios set intentos_fallidos = 0, bloqueado_hasta = null where id = $1',
@@ -272,7 +281,7 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
     const actor = req.sesion!.usuario;
     const { rows } = await pool.query(
       `select u.id, u.email, u.nombre, u.activo, u.es_propietario, u.totp_activo as mfa_activo,
-              u.debe_cambiar_contrasena, u.creado_en, u.creado_por, c.email as creado_por_email,
+              u.debe_cambiar_contrasena, u.vence_en, u.creado_en, u.creado_por, c.email as creado_por_email,
               ${PERMISOS.map((p) => `u.${p}`).join(', ')}
          from usuarios u left join usuarios c on c.id = u.creado_por
         order by u.es_propietario desc, u.creado_en`,
@@ -295,18 +304,22 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
     const pedidos = { ...PERMISOS_POR_DEFECTO, ...datos.data.permisos };
     const negado = validarPermisosConcedidos(actor, pedidos);
     if (negado) return reply.code(403).send({ error: 'permiso_no_concedible', permiso: negado });
+    if (datos.data.vence_en && new Date(datos.data.vence_en) <= new Date()) {
+      return reply.code(400).send({ error: 'vencimiento_pasado' });
+    }
     const temporal = contrasenaTemporal();
     try {
       const { rows } = await pool.query(
         `insert into usuarios (email, nombre, hash_contrasena, debe_cambiar_contrasena, creado_por,
-           ${PERMISOS.join(', ')})
-         values ($1, $2, $3, true, $4, ${PERMISOS.map((_, i) => `$${i + 5}`).join(', ')})
+           vence_en, ${PERMISOS.join(', ')})
+         values ($1, $2, $3, true, $4, $5, ${PERMISOS.map((_, i) => `$${i + 6}`).join(', ')})
          returning id`,
         [
           datos.data.email,
           datos.data.nombre,
           await hashContrasena(temporal),
           actor.id,
+          datos.data.vence_en ?? null,
           ...PERMISOS.map((p) => pedidos[p] === true),
         ],
       );
@@ -334,7 +347,8 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
       if (!objetivo) return reply.code(404).send({ error: 'no_encontrado' });
       if (!puedeGestionar(actor, objetivo)) return reply.code(403).send({ error: 'sin_permiso' });
 
-      const { activo, nombre, permisos, restablecer_contrasena, quitar_mfa } = datos.data;
+      const { activo, nombre, email, vence_en, permisos, restablecer_contrasena, quitar_mfa } =
+        datos.data;
       if (permisos) {
         const negado = validarPermisosConcedidos(actor, permisos);
         if (negado)
@@ -349,6 +363,8 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
       };
       if (activo !== undefined) fijar('activo', activo);
       if (nombre !== undefined) fijar('nombre', nombre);
+      if (email !== undefined) fijar('email', email);
+      if (vence_en !== undefined) fijar('vence_en', vence_en);
       if (permisos) for (const p of PERMISOS) if (permisos[p] !== undefined) fijar(p, permisos[p]);
       if (temporal) {
         fijar('hash_contrasena', await hashContrasena(temporal));
@@ -361,7 +377,13 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
         fijar('totp_secreto', null);
       }
       if (sets.length) {
-        await pool.query(`update usuarios set ${sets.join(', ')} where id = $1`, valores);
+        try {
+          await pool.query(`update usuarios set ${sets.join(', ')} where id = $1`, valores);
+        } catch (e) {
+          if ((e as { code?: string }).code === '23505')
+            return reply.code(409).send({ error: 'email_existente' });
+          throw e;
+        }
       }
       if (activo === false || temporal) {
         await pool.query('delete from sesiones where usuario_id = $1', [req.params.id]);

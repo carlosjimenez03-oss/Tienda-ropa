@@ -12,6 +12,7 @@ export interface FilaUsuario {
   nombre: string;
   es_propietario: boolean;
   creado_por: string | null;
+  vence_en: string | null;
   debe_cambiar_contrasena: boolean;
   puede_vender: boolean;
   puede_agregar_mercancia: boolean;
@@ -77,7 +78,8 @@ export async function leerSesion(pool: Pool, req: FastifyRequest): Promise<Sesio
   const { rows } = await pool.query(
     `select s.mfa_pendiente, s.ultimo_uso, u.*
        from sesiones s join usuarios u on u.id = s.usuario_id
-      where s.id = $1 and s.expira_en > now() and u.activo`,
+      where s.id = $1 and s.expira_en > now() and u.activo
+        and (u.vence_en is null or u.vence_en > now())`,
     [tokenHash],
   );
   if (rows.length === 0) return null;

@@ -9,6 +9,7 @@ import {
   type Permisos,
 } from '../../shared/permisos';
 import { db } from '../db/local';
+import { diaLocal } from '../dominio/resumen';
 import { sincronizar, useEstadoSync } from '../sync/engine';
 import { haceTiempo } from '../componentes/BarraEstado';
 import { esInstalada, esIOS } from '../componentes/AvisoInstalacion';
@@ -22,6 +23,7 @@ const MENSAJES: Record<string, string> = {
   codigo_invalido: 'El código no es correcto. Revisa la app autenticadora e inténtalo de nuevo.',
   contrasena_actual_incorrecta: 'La contraseña actual no es correcta.',
   email_existente: 'Ya existe una cuenta con ese correo.',
+  vencimiento_pasado: 'La fecha de vencimiento ya pasó. Elige una fecha futura.',
   permiso_no_concedible: 'No puedes dar un permiso que tú no tienes.',
   sin_permiso: 'No tienes permiso para hacer esto.',
   contrasena_repetida: 'La nueva contraseña debe ser distinta de la actual.',
@@ -322,6 +324,7 @@ interface UsuarioLista {
   es_propietario: boolean;
   mfa_activo: boolean;
   debe_cambiar_contrasena: boolean;
+  vence_en: string | null;
   creado_por_email: string | null;
   gestionable: boolean;
   permisos: Permisos;
@@ -431,19 +434,140 @@ function ContrasenaTemporal({
   );
 }
 
+// ---------- Tiempo de acceso ----------
+
+type ModoVence = 'sin' | '1' | '7' | '30' | '90' | 'fecha';
+interface Vencimiento {
+  modo: ModoVence;
+  /** AAAA-MM-DD, solo con modo "fecha" */
+  fecha: string;
+}
+
+const SIN_LIMITE: Vencimiento = { modo: 'sin', fecha: '' };
+const OPCIONES_VENCE: { modo: ModoVence; texto: string }[] = [
+  { modo: 'sin', texto: 'Sin límite' },
+  { modo: '1', texto: '1 día' },
+  { modo: '7', texto: '7 días' },
+  { modo: '30', texto: '30 días' },
+  { modo: '90', texto: '90 días' },
+  { modo: 'fecha', texto: 'Hasta una fecha…' },
+];
+const formatoVence = new Intl.DateTimeFormat('es-DO', {
+  dateStyle: 'long',
+  timeStyle: 'short',
+  timeZone: 'America/Santo_Domingo',
+});
+
+/** Convierte la elección en la fecha ISO de vencimiento (o null = sin límite). */
+export function aFechaVence(v: Vencimiento, ahora = Date.now()): string | null {
+  if (v.modo === 'sin') return null;
+  if (v.modo === 'fecha') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v.fecha)) throw new Error('Elige la fecha de vencimiento');
+    // Hasta el final de ese día en Santo Domingo (UTC-4, sin horario de verano)
+    return new Date(`${v.fecha}T23:59:59-04:00`).toISOString();
+  }
+  return new Date(ahora + Number(v.modo) * 86_400_000).toISOString();
+}
+
+function desdeFechaVence(iso: string | null): Vencimiento {
+  return iso ? { modo: 'fecha', fecha: diaLocal(iso) } : SIN_LIMITE;
+}
+
+function SelectorVencimiento({
+  valor,
+  onCambio,
+  id,
+}: {
+  valor: Vencimiento;
+  onCambio: (v: Vencimiento) => void;
+  id: string;
+}) {
+  const manana = diaLocal(new Date(Date.now() + 86_400_000));
+  return (
+    <div>
+      <label className="etiqueta" htmlFor={`${id}-vence`}>
+        Tiempo de acceso
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <select
+          id={`${id}-vence`}
+          className="campo w-auto"
+          value={valor.modo}
+          onChange={(e) => {
+            const modo = e.target.value as ModoVence;
+            onCambio({ modo, fecha: modo === 'fecha' ? valor.fecha || manana : '' });
+          }}
+        >
+          {OPCIONES_VENCE.map((o) => (
+            <option key={o.modo} value={o.modo}>
+              {o.texto}
+            </option>
+          ))}
+        </select>
+        {valor.modo === 'fecha' && (
+          <input
+            type="date"
+            className="campo w-auto"
+            aria-label="Fecha de vencimiento"
+            min={diaLocal(new Date())}
+            value={valor.fecha}
+            onChange={(e) => onCambio({ modo: 'fecha', fecha: e.target.value })}
+          />
+        )}
+      </div>
+      <p className="mt-1 text-xs text-stone-500">
+        {valor.modo === 'sin'
+          ? 'Podrá entrar hasta que lo desactives.'
+          : 'Cuando se cumpla el tiempo no podrá entrar y su sesión se cerrará.'}
+      </p>
+    </div>
+  );
+}
+
+function EtiquetaVence({ vence }: { vence: string | null }) {
+  if (!vence) return null;
+  const restante = new Date(vence).getTime() - Date.now();
+  if (restante <= 0) {
+    return (
+      <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
+        ⛔ Acceso vencido
+      </span>
+    );
+  }
+  const pronto = restante < 3 * 86_400_000;
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-xs ${
+        pronto ? 'bg-amber-100 text-amber-900' : 'bg-sky-50 text-sky-800'
+      }`}
+    >
+      ⏳ Acceso hasta {formatoVence.format(new Date(vence))}
+    </span>
+  );
+}
+
+interface Edicion {
+  nombre: string;
+  email: string;
+  vence: Vencimiento;
+  permisos: Permisos;
+}
+
 function Usuarios() {
   const propios = usePermisos();
   const [lista, setLista] = useState<UsuarioLista[] | null>(null);
   const [error, setError] = useState('');
   const [creando, setCreando] = useState(false);
-  const [form, setForm] = useState({
+  const formVacio = () => ({
     email: '',
     nombre: '',
+    vence: SIN_LIMITE,
     permisos: { ...PERMISOS_POR_DEFECTO },
   });
+  const [form, setForm] = useState(formVacio);
   const [temporal, setTemporal] = useState<{ email: string; clave: string } | null>(null);
   const [editando, setEditando] = useState<string | null>(null);
-  const [permisosEdicion, setPermisosEdicion] = useState<Permisos>(PERMISOS_POR_DEFECTO);
+  const [edicion, setEdicion] = useState<Edicion | null>(null);
 
   const cargar = () =>
     api<{ usuarios: UsuarioLista[] }>('/api/usuarios')
@@ -457,9 +581,16 @@ function Usuarios() {
     e.preventDefault();
     setError('');
     try {
-      const r = await api<{ contrasena_temporal: string }>('/api/usuarios', { body: form });
+      const r = await api<{ contrasena_temporal: string }>('/api/usuarios', {
+        body: {
+          email: form.email,
+          nombre: form.nombre,
+          permisos: form.permisos,
+          vence_en: aFechaVence(form.vence),
+        },
+      });
       setTemporal({ email: form.email.trim().toLowerCase(), clave: r.contrasena_temporal });
-      setForm({ email: '', nombre: '', permisos: { ...PERMISOS_POR_DEFECTO } });
+      setForm(formVacio());
       setCreando(false);
       cargar();
     } catch (err) {
@@ -529,6 +660,11 @@ function Usuarios() {
               onChange={(e) => setForm({ ...form, nombre: e.target.value })}
             />
           </div>
+          <SelectorVencimiento
+            id="nuevo"
+            valor={form.vence}
+            onCambio={(vence) => setForm({ ...form, vence })}
+          />
           <CasillasPermisos
             prefijo="nuevo"
             valor={form.permisos}
@@ -576,6 +712,7 @@ function Usuarios() {
                         {DESCRIPCION_PERMISO[p].titulo}
                       </span>
                     ))}
+                    <EtiquetaVence vence={u.vence_en} />
                     {u.debe_cambiar_contrasena && (
                       <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-900">
                         Aún no ha cambiado la contraseña
@@ -598,27 +735,73 @@ function Usuarios() {
                     className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm"
                     onClick={() => {
                       setEditando(u.id);
-                      setPermisosEdicion(u.permisos);
+                      setEdicion({
+                        nombre: u.nombre,
+                        email: u.email,
+                        vence: desdeFechaVence(u.vence_en),
+                        permisos: u.permisos,
+                      });
                     }}
                   >
-                    Gestionar
+                    Editar
                   </button>
                 )}
               </div>
-              {editando === u.id && (
+              {editando === u.id && edicion && (
                 <div className="mt-3 space-y-3 rounded-2xl border border-stone-200 p-3">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="etiqueta" htmlFor={`${u.id}-nombre`}>
+                        Nombre
+                      </label>
+                      <input
+                        id={`${u.id}-nombre`}
+                        className="campo"
+                        value={edicion.nombre}
+                        onChange={(e) => setEdicion({ ...edicion, nombre: e.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <label className="etiqueta" htmlFor={`${u.id}-email`}>
+                        Correo
+                      </label>
+                      <input
+                        id={`${u.id}-email`}
+                        className="campo"
+                        type="email"
+                        value={edicion.email}
+                        onChange={(e) => setEdicion({ ...edicion, email: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <SelectorVencimiento
+                    id={u.id}
+                    valor={edicion.vence}
+                    onCambio={(vence) => setEdicion({ ...edicion, vence })}
+                  />
                   <CasillasPermisos
                     prefijo={u.id}
-                    valor={permisosEdicion}
+                    valor={edicion.permisos}
                     propios={propios}
-                    onCambio={setPermisosEdicion}
+                    onCambio={(permisos) => setEdicion({ ...edicion, permisos })}
                   />
                   <div className="flex flex-wrap gap-2">
                     <button
                       className="boton-primario min-h-10"
-                      onClick={() => cambiar(u, { permisos: permisosEdicion })}
+                      onClick={() => {
+                        try {
+                          cambiar(u, {
+                            nombre: edicion.nombre,
+                            email: edicion.email,
+                            vence_en: aFechaVence(edicion.vence),
+                            permisos: edicion.permisos,
+                          });
+                        } catch (err) {
+                          setError((err as Error).message);
+                        }
+                      }}
                     >
-                      Guardar permisos
+                      Guardar cambios
                     </button>
                     <button
                       className="boton-secundario min-h-10"

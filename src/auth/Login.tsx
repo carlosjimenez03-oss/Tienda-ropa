@@ -8,6 +8,7 @@ import type { UsuarioPublico } from '../../shared/esquemas';
 const ERRORES: Record<string, string> = {
   credenciales_invalidas: 'Correo o contraseña incorrectos.',
   cuenta_bloqueada_temporalmente: 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.',
+  cuenta_vencida: 'Tu tiempo de acceso terminó. Pide a quien creó tu cuenta que te dé más tiempo.',
   codigo_invalido: 'El código no es válido.',
   datos_invalidos: 'Revisa los datos.',
   http_429: 'Demasiados intentos. Espera un minuto.',

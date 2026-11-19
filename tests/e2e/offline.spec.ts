@@ -224,3 +224,37 @@ test('quien tiene permiso crea un usuario con permisos limitados y este debe cam
   await irA(b, 'Ajustes');
   await expect(b.getByRole('heading', { name: 'Usuarios' })).toHaveCount(0);
 });
+
+test('se le pone un tiempo de acceso al usuario y luego se edita', async ({ browser }) => {
+  const a = await nuevoDispositivo(browser);
+  const email = `temporal${Date.now()}@tienda.test`;
+  await irA(a, 'Ajustes');
+  await a.getByRole('button', { name: '+ Crear usuario' }).click();
+  await a.getByLabel('Correo', { exact: true }).fill(email);
+  await a.getByLabel('Nombre', { exact: true }).fill('Temporal');
+  await a.getByLabel('Tiempo de acceso').selectOption('7');
+  await a.getByRole('button', { name: 'Crear usuario' }).click();
+  await expect(a.getByTestId('contrasena-temporal')).toBeVisible();
+
+  const fila = a.getByRole('listitem').filter({ hasText: email });
+  await expect(fila.getByText(/Acceso hasta/)).toBeVisible();
+
+  await fila.getByRole('button', { name: 'Editar' }).click();
+  await fila.getByLabel('Nombre', { exact: true }).fill('Temporal editado');
+  await fila.getByLabel('Tiempo de acceso').selectOption('fecha');
+  await fila.getByLabel('Fecha de vencimiento').fill('2099-12-31');
+  await fila.getByRole('button', { name: 'Guardar cambios' }).click();
+
+  const editada = a.getByRole('listitem').filter({ hasText: email });
+  await expect(editada.getByText(/Acceso hasta 31 de diciembre de 2099/)).toBeVisible();
+
+  await editada.getByRole('button', { name: 'Editar' }).click();
+  await editada.getByLabel('Tiempo de acceso').selectOption('sin');
+  await editada.getByRole('button', { name: 'Guardar cambios' }).click();
+  await expect(
+    a
+      .getByRole('listitem')
+      .filter({ hasText: 'Temporal editado' })
+      .getByText(/Acceso hasta/),
+  ).toHaveCount(0);
+});

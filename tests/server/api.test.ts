@@ -567,6 +567,89 @@ d('API (integración con Postgres)', () => {
     expect(sigue.rowCount).toBe(1);
   });
 
+  it('el acceso vence en la fecha indicada y se puede editar', async () => {
+    const enUnaHora = new Date(Date.now() + 3_600_000).toISOString();
+    const creado = await app.inject({
+      method: 'POST',
+      url: '/api/usuarios',
+      headers: H(),
+      payload: { email: 'temporal@tienda.test', nombre: 'Temporal', vence_en: enUnaHora },
+    });
+    expect(creado.statusCode).toBe(200);
+    const pasado = await app.inject({
+      method: 'POST',
+      url: '/api/usuarios',
+      headers: H(),
+      payload: { email: 'otro@tienda.test', vence_en: '2020-01-01T00:00:00.000Z' },
+    });
+    expect(pasado.json().error).toBe('vencimiento_pasado');
+
+    const h = await entrarComo(
+      'temporal@tienda.test',
+      creado.json().contrasena_temporal,
+      'temporal-segura-1',
+    );
+    const id = creado.json().id;
+
+    // Editar nombre, correo y ampliar el plazo
+    const editar = await app.inject({
+      method: 'PATCH',
+      url: `/api/usuarios/${id}`,
+      headers: H(),
+      payload: {
+        nombre: 'Temporal editado',
+        email: 'Temporal2@Tienda.test',
+        vence_en: new Date(Date.now() + 86_400_000).toISOString(),
+      },
+    });
+    expect(editar.statusCode).toBe(200);
+    const lista = await app.inject({ method: 'GET', url: '/api/usuarios', headers: H() });
+    const fila = lista.json().usuarios.find((u: { id: string }) => u.id === id);
+    expect(fila).toMatchObject({ nombre: 'Temporal editado', email: 'temporal2@tienda.test' });
+    expect(fila.vence_en).toBeTruthy();
+    const duplicado = await app.inject({
+      method: 'PATCH',
+      url: `/api/usuarios/${id}`,
+      headers: H(),
+      payload: { email: admin.email },
+    });
+    expect(duplicado.statusCode).toBe(409);
+
+    // Al vencer, la sesión abierta deja de valer y no puede volver a entrar
+    await pool.query("update usuarios set vence_en = now() - interval '1 minute' where id = $1", [
+      id,
+    ]);
+    const conSesion = await app.inject({
+      method: 'GET',
+      url: '/api/sync/pull?desde=0',
+      headers: h,
+    });
+    expect(conSesion.statusCode).toBe(401);
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/auth/entrar',
+      headers: { 'x-inventario': '1' },
+      payload: { email: 'temporal2@tienda.test', contrasena: 'temporal-segura-1' },
+    });
+    expect(login.statusCode).toBe(403);
+    expect(login.json().error).toBe('cuenta_vencida');
+
+    // Quitar el límite le devuelve el acceso
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/usuarios/${id}`,
+      headers: H(),
+      payload: { vence_en: null },
+    });
+    const otraVez = await app.inject({
+      method: 'POST',
+      url: '/api/auth/entrar',
+      headers: { 'x-inventario': '1' },
+      payload: { email: 'temporal2@tienda.test', contrasena: 'temporal-segura-1' },
+    });
+    expect(otraVez.statusCode).toBe(200);
+  });
+
   it('la cookie de sesión es Secure cuando la visita llega por HTTPS (detrás de Traefik)', async () => {
     const entrar = (proto: string) =>
       app.inject({
