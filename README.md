@@ -59,6 +59,9 @@ cp .env.example .env   # y edita PUBLIC_URL=http://localhost:3000
 docker compose up -d --build
 ```
 
+El servicio `app` se conecta a la red externa `dokploy-network` (la de Traefik en Dokploy). Fuera de
+Dokploy créala una vez con `docker network create dokploy-network`.
+
 Para exponer el puerto en local añade `ports: ['3000:3000']` al servicio `app` (en Dokploy no hace falta).
 
 ---

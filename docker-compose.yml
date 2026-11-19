@@ -2,6 +2,10 @@
 # En Dokploy: crear un servicio "Docker Compose" apuntando a este repositorio,
 # pegar las variables de .env.example en la pestaña Environment y asignar el
 # dominio al servicio "app", puerto 3000 (Dokploy gestiona HTTPS con Traefik).
+#
+# El servicio "app" se une a la red "dokploy-network" para que Traefik (el proxy
+# de Dokploy) pueda alcanzarlo. Para probar en local fuera de Dokploy, crea
+# antes esa red una vez:  docker network create dokploy-network
 services:
   app:
     build: .
@@ -12,7 +16,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-inventario}:${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-inventario}
-      PUBLIC_URL: ${PUBLIC_URL:?Define PUBLIC_URL (https://tu-dominio)}
+      PUBLIC_URL: ${PUBLIC_URL:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       SESSION_DAYS: ${SESSION_DAYS:-90}
@@ -20,6 +24,9 @@ services:
       - uploads:/data/uploads
     expose:
       - '3000'
+    networks:
+      - default
+      - dokploy-network
 
   db:
     image: postgres:16-alpine
@@ -61,3 +68,7 @@ volumes:
   pgdata:
   uploads:
   backups:
+
+networks:
+  dokploy-network:
+    external: true

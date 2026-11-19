@@ -108,11 +108,12 @@ export async function asegurarAdminInicial(pool: Pool, cfg: Config, log: (m: str
 
 export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: Config }) {
   const { pool, cfg } = opts;
-  const seguro = cfg.urlPublica.startsWith('https://');
-  const opcionesSesion = (mfaPendiente: boolean) => ({
+  // La cookie es "Secure" cuando la visita llega por HTTPS (Traefik informa el
+  // protocolo original), sin depender de que PUBLIC_URL esté bien escrita.
+  const opcionesSesion = (req: FastifyRequest, mfaPendiente: boolean) => ({
     mfaPendiente,
     dias: cfg.diasSesion,
-    seguro,
+    seguro: req.protocol === 'https',
   });
   const limiteLogin = { config: { rateLimit: { max: cfg.limiteLogin, timeWindow: '1 minute' } } };
   const conSesion = requerirSesion(pool);
@@ -153,7 +154,7 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
       'update usuarios set intentos_fallidos = 0, bloqueado_hasta = null where id = $1',
       [u.id],
     );
-    await crearSesion(pool, reply, u.id, opcionesSesion(u.totp_activo));
+    await crearSesion(pool, reply, u.id, opcionesSesion(req, u.totp_activo));
     if (u.totp_activo) return { mfa: true };
     return { usuario: usuarioPublico(u) };
   });
@@ -171,7 +172,7 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
       return reply.code(401).send({ error: 'codigo_invalido' });
     }
     await pool.query('delete from sesiones where id = $1', [sesion.tokenHash]);
-    await crearSesion(pool, reply, u.id, opcionesSesion(false));
+    await crearSesion(pool, reply, u.id, opcionesSesion(req, false));
     return { usuario: usuarioPublico(u) };
   });
 

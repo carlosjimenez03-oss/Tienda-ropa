@@ -43,7 +43,8 @@ export async function construirApp(
       },
     },
     crossOriginEmbedderPolicy: false,
-    hsts: cfg.urlPublica.startsWith('https://') ? { maxAge: 31536000 } : false,
+    // Los navegadores ignoran HSTS en HTTP; en HTTPS fuerza conexiones seguras
+    hsts: { maxAge: 31536000 },
   });
   await app.register(cookie);
   await app.register(rateLimit, { global: false });

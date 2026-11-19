@@ -567,6 +567,20 @@ d('API (integración con Postgres)', () => {
     expect(sigue.rowCount).toBe(1);
   });
 
+  it('la cookie de sesión es Secure cuando la visita llega por HTTPS (detrás de Traefik)', async () => {
+    const entrar = (proto: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/auth/entrar',
+        headers: { 'x-inventario': '1', 'x-forwarded-proto': proto },
+        payload: { email: admin.email, contrasena: admin.contrasena },
+      });
+    const https = await entrar('https');
+    expect(https.cookies.find((k) => k.name === 'sid')!.secure).toBe(true);
+    const http = await entrar('http');
+    expect(http.cookies.find((k) => k.name === 'sid')!.secure).toBeFalsy();
+  });
+
   it('bloquea la cuenta tras varios intentos fallidos', async () => {
     await app.inject({
       method: 'POST',
