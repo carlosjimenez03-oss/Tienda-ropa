@@ -80,8 +80,14 @@ const nuevoUsuarioEsquema = z.object({
   nombre: z.string().trim().max(120).default(''),
   permisos: permisosEsquema.default({}),
   vence_en: venceEsquema.optional(),
+  /** Contraseña escrita por quien crea el usuario; si falta, se genera una temporal. */
+  contrasena: z.string().max(200).optional(),
+  /** Si la persona debe cambiarla al entrar (por defecto sí). */
+  exigir_cambio: z.boolean().default(true),
 });
 const cambioUsuarioEsquema = z.object({
+  contrasena: z.string().max(200).optional(),
+  exigir_cambio: z.boolean().default(true),
   activo: z.boolean().optional(),
   nombre: z.string().trim().max(120).optional(),
   email: z.string().trim().toLowerCase().email().max(254).optional(),
@@ -307,23 +313,34 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
     if (datos.data.vence_en && new Date(datos.data.vence_en) <= new Date()) {
       return reply.code(400).send({ error: 'vencimiento_pasado' });
     }
-    const temporal = contrasenaTemporal();
+    const manual = datos.data.contrasena;
+    if (manual !== undefined) {
+      const error = contrasenaValida(manual);
+      if (error) return reply.code(400).send({ error: 'contrasena_debil', mensaje: error });
+    }
+    const clave = manual ?? contrasenaTemporal();
+    // Una contraseña generada siempre es temporal; una escrita a mano, según se elija
+    const exigirCambio = manual === undefined ? true : datos.data.exigir_cambio;
     try {
       const { rows } = await pool.query(
         `insert into usuarios (email, nombre, hash_contrasena, debe_cambiar_contrasena, creado_por,
            vence_en, ${PERMISOS.join(', ')})
-         values ($1, $2, $3, true, $4, $5, ${PERMISOS.map((_, i) => `$${i + 6}`).join(', ')})
+         values ($1, $2, $3, $4, $5, $6, ${PERMISOS.map((_, i) => `$${i + 7}`).join(', ')})
          returning id`,
         [
           datos.data.email,
           datos.data.nombre,
-          await hashContrasena(temporal),
+          await hashContrasena(clave),
+          exigirCambio,
           actor.id,
           datos.data.vence_en ?? null,
           ...PERMISOS.map((p) => pedidos[p] === true),
         ],
       );
-      return { id: rows[0].id, contrasena_temporal: temporal };
+      // La contraseña escrita a mano ya la conoce quien la escribió: no se devuelve
+      return manual === undefined
+        ? { id: rows[0].id, contrasena_temporal: clave }
+        : { id: rows[0].id };
     } catch (e) {
       if ((e as { code?: string }).code === '23505')
         return reply.code(409).send({ error: 'email_existente' });
@@ -347,14 +364,28 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
       if (!objetivo) return reply.code(404).send({ error: 'no_encontrado' });
       if (!puedeGestionar(actor, objetivo)) return reply.code(403).send({ error: 'sin_permiso' });
 
-      const { activo, nombre, email, vence_en, permisos, restablecer_contrasena, quitar_mfa } =
-        datos.data;
+      const {
+        activo,
+        nombre,
+        email,
+        vence_en,
+        permisos,
+        restablecer_contrasena,
+        quitar_mfa,
+        contrasena,
+        exigir_cambio,
+      } = datos.data;
       if (permisos) {
         const negado = validarPermisosConcedidos(actor, permisos);
         if (negado)
           return reply.code(403).send({ error: 'permiso_no_concedible', permiso: negado });
       }
+      if (contrasena !== undefined) {
+        const error = contrasenaValida(contrasena);
+        if (error) return reply.code(400).send({ error: 'contrasena_debil', mensaje: error });
+      }
       const temporal = restablecer_contrasena ? contrasenaTemporal() : null;
+      const nuevaClave = contrasena ?? temporal;
       const valores: unknown[] = [req.params.id];
       const sets: string[] = [];
       const fijar = (columna: string, valor: unknown) => {
@@ -366,9 +397,9 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
       if (email !== undefined) fijar('email', email);
       if (vence_en !== undefined) fijar('vence_en', vence_en);
       if (permisos) for (const p of PERMISOS) if (permisos[p] !== undefined) fijar(p, permisos[p]);
-      if (temporal) {
-        fijar('hash_contrasena', await hashContrasena(temporal));
-        fijar('debe_cambiar_contrasena', true);
+      if (nuevaClave) {
+        fijar('hash_contrasena', await hashContrasena(nuevaClave));
+        fijar('debe_cambiar_contrasena', contrasena !== undefined ? exigir_cambio : true);
         fijar('intentos_fallidos', 0);
         fijar('bloqueado_hasta', null);
       }
@@ -385,7 +416,8 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
           throw e;
         }
       }
-      if (activo === false || temporal) {
+      // Al cambiar la contraseña se cierran sus sesiones abiertas
+      if (activo === false || nuevaClave) {
         await pool.query('delete from sesiones where usuario_id = $1', [req.params.id]);
       }
       return temporal ? { ok: true, contrasena_temporal: temporal } : { ok: true };

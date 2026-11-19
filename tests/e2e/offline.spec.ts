@@ -307,3 +307,43 @@ test('tomar foto explica el permiso, abre la cámara dentro de la app y guarda l
   await camara.getByRole('button', { name: 'Tomar foto', exact: true }).click();
   await expect(a.getByAltText('Vista previa')).toBeVisible();
 });
+
+test('la contraseña de un usuario creado se puede escribir a mano y cambiar después', async ({
+  browser,
+}) => {
+  const a = await nuevoDispositivo(browser);
+  const email = `manual${Date.now()}@tienda.test`;
+  await irA(a, 'Ajustes');
+  await a.getByRole('button', { name: '+ Crear usuario' }).click();
+  await a.getByLabel('Correo', { exact: true }).fill(email);
+  await a.getByRole('radio', { name: 'Escribirla yo' }).check();
+  await a.getByLabel('Contraseña (mínimo 10 caracteres)').fill('primera-clave-1');
+  await a.getByRole('button', { name: 'Crear usuario' }).click();
+  await expect(a.getByRole('status')).toContainText(`Usuario ${email} creado`);
+
+  // Entra directamente con la contraseña escrita (sin cambio obligatorio)
+  const b = await (await browser.newContext()).newPage();
+  await b.goto('/');
+  await b.getByLabel('Correo').fill(email);
+  await b.getByLabel('Contraseña', { exact: true }).fill('primera-clave-1');
+  await b.getByRole('button', { name: 'Entrar' }).click();
+  await expect(b.getByRole('navigation')).toBeVisible();
+  await expect(b.getByRole('heading', { name: 'Crea tu contraseña' })).toHaveCount(0);
+
+  // Se le cambia a mano desde Editar
+  const fila = a.getByRole('listitem').filter({ hasText: email });
+  await fila.getByRole('button', { name: 'Editar' }).click();
+  await fila.getByLabel('Contraseña (mínimo 10 caracteres)').fill('segunda-clave-2');
+  await fila.getByRole('button', { name: 'Guardar contraseña' }).click();
+  await expect(a.getByRole('status')).toContainText('cambiada');
+
+  const c = await (await browser.newContext()).newPage();
+  await c.goto('/');
+  await c.getByLabel('Correo').fill(email);
+  await c.getByLabel('Contraseña', { exact: true }).fill('primera-clave-1');
+  await c.getByRole('button', { name: 'Entrar' }).click();
+  await expect(c.getByRole('alert')).toContainText('incorrectos');
+  await c.getByLabel('Contraseña', { exact: true }).fill('segunda-clave-2');
+  await c.getByRole('button', { name: 'Entrar' }).click();
+  await expect(c.getByRole('navigation')).toBeVisible();
+});

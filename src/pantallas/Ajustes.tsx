@@ -494,6 +494,58 @@ function EtiquetaVence({ vence }: { vence: string | null }) {
   );
 }
 
+/** Contraseña escrita a mano por quien gestiona el usuario. */
+function ContrasenaManual({
+  id,
+  clave,
+  exigirCambio,
+  onClave,
+  onExigirCambio,
+}: {
+  id: string;
+  clave: string;
+  exigirCambio: boolean;
+  onClave: (v: string) => void;
+  onExigirCambio: (v: boolean) => void;
+}) {
+  const [ver, setVer] = useState(false);
+  return (
+    <div className="space-y-2">
+      <label className="etiqueta" htmlFor={`${id}-clave`}>
+        Contraseña (mínimo 10 caracteres)
+      </label>
+      <div className="flex gap-2">
+        <input
+          id={`${id}-clave`}
+          className="campo"
+          type={ver ? 'text' : 'password'}
+          autoComplete="new-password"
+          minLength={10}
+          value={clave}
+          onChange={(e) => onClave(e.target.value)}
+        />
+        <button
+          type="button"
+          className="boton-secundario shrink-0 px-3"
+          onClick={() => setVer((v) => !v)}
+          aria-label={ver ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+        >
+          {ver ? '🙈' : '👁️'}
+        </button>
+      </div>
+      <label className="flex cursor-pointer items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          className="h-5 w-5 shrink-0 accent-marca-700"
+          checked={exigirCambio}
+          onChange={(e) => onExigirCambio(e.target.checked)}
+        />
+        Pedir que la cambie al entrar
+      </label>
+    </div>
+  );
+}
+
 interface Edicion {
   nombre: string;
   email: string;
@@ -511,11 +563,16 @@ function Usuarios() {
     nombre: '',
     vence: SIN_LIMITE,
     permisos: { ...PERMISOS_POR_DEFECTO },
+    modoClave: 'generar' as 'generar' | 'manual',
+    clave: '',
+    exigirCambio: false,
   });
   const [form, setForm] = useState(formVacio);
   const [temporal, setTemporal] = useState<{ email: string; clave: string } | null>(null);
+  const [aviso, setAviso] = useState('');
   const [editando, setEditando] = useState<string | null>(null);
   const [edicion, setEdicion] = useState<Edicion | null>(null);
+  const [claveEdicion, setClaveEdicion] = useState({ clave: '', exigirCambio: false });
 
   const cargar = () =>
     api<{ usuarios: UsuarioLista[] }>('/api/usuarios')
@@ -528,16 +585,24 @@ function Usuarios() {
   async function crear(e: FormEvent) {
     e.preventDefault();
     setError('');
+    setAviso('');
     try {
-      const r = await api<{ contrasena_temporal: string }>('/api/usuarios', {
+      const manual = form.modoClave === 'manual';
+      if (manual && form.clave.length < 10) {
+        throw new Error('La contraseña debe tener al menos 10 caracteres.');
+      }
+      const email = form.email.trim().toLowerCase();
+      const r = await api<{ contrasena_temporal?: string }>('/api/usuarios', {
         body: {
           email: form.email,
           nombre: form.nombre,
           permisos: form.permisos,
           vence_en: aFechaVence(form.vence),
+          ...(manual ? { contrasena: form.clave, exigir_cambio: form.exigirCambio } : {}),
         },
       });
-      setTemporal({ email: form.email.trim().toLowerCase(), clave: r.contrasena_temporal });
+      if (r.contrasena_temporal) setTemporal({ email, clave: r.contrasena_temporal });
+      else setAviso(`✅ Usuario ${email} creado con la contraseña que escribiste.`);
       setForm(formVacio());
       setCreando(false);
       cargar();
@@ -546,8 +611,9 @@ function Usuarios() {
     }
   }
 
-  async function cambiar(u: UsuarioLista, cambios: Record<string, unknown>) {
+  async function cambiar(u: UsuarioLista, cambios: Record<string, unknown>): Promise<boolean> {
     setError('');
+    setAviso('');
     try {
       const r = await api<{ contrasena_temporal?: string }>(`/api/usuarios/${u.id}`, {
         method: 'PATCH',
@@ -556,8 +622,10 @@ function Usuarios() {
       if (r.contrasena_temporal) setTemporal({ email: u.email, clave: r.contrasena_temporal });
       setEditando(null);
       cargar();
+      return true;
     } catch (err) {
       setError(msj(err));
+      return false;
     }
   }
 
@@ -580,6 +648,11 @@ function Usuarios() {
         />
       )}
       {error && <p className="text-sm text-red-700">{error}</p>}
+      {aviso && (
+        <p className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-900" role="status">
+          {aviso}
+        </p>
+      )}
 
       {creando && (
         <form onSubmit={crear} className="space-y-3 rounded-2xl border border-marca-200 p-4">
@@ -619,9 +692,35 @@ function Usuarios() {
             propios={propios}
             onCambio={(permisos) => setForm({ ...form, permisos })}
           />
-          <p className="text-sm text-stone-500">
-            Se generará una contraseña temporal; la persona deberá cambiarla al entrar.
-          </p>
+          <fieldset className="space-y-2">
+            <legend className="etiqueta">Contraseña</legend>
+            {(
+              [
+                ['generar', 'Generar una temporal (la deberá cambiar al entrar)'],
+                ['manual', 'Escribirla yo'],
+              ] as const
+            ).map(([modo, texto]) => (
+              <label key={modo} className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="radio"
+                  name="modo-clave"
+                  className="h-5 w-5 shrink-0 accent-marca-700"
+                  checked={form.modoClave === modo}
+                  onChange={() => setForm({ ...form, modoClave: modo })}
+                />
+                {texto}
+              </label>
+            ))}
+            {form.modoClave === 'manual' && (
+              <ContrasenaManual
+                id="nuevo"
+                clave={form.clave}
+                exigirCambio={form.exigirCambio}
+                onClave={(clave) => setForm({ ...form, clave })}
+                onExigirCambio={(exigirCambio) => setForm({ ...form, exigirCambio })}
+              />
+            )}
+          </fieldset>
           <div className="flex gap-2">
             <button className="boton-primario">Crear usuario</button>
             <button type="button" className="boton-secundario" onClick={() => setCreando(false)}>
@@ -683,6 +782,8 @@ function Usuarios() {
                     className="rounded-lg border border-stone-300 px-3 py-1.5 text-sm"
                     onClick={() => {
                       setEditando(u.id);
+                      setAviso('');
+                      setClaveEdicion({ clave: '', exigirCambio: false });
                       setEdicion({
                         nombre: u.nombre,
                         email: u.email,
@@ -751,15 +852,52 @@ function Usuarios() {
                     >
                       Guardar cambios
                     </button>
-                    <button
-                      className="boton-secundario min-h-10"
-                      onClick={() =>
-                        confirm(`¿Generar una contraseña temporal nueva para ${u.email}?`) &&
-                        cambiar(u, { restablecer_contrasena: true })
+                  </div>
+
+                  <div className="space-y-2 rounded-xl bg-stone-50 p-3">
+                    <h4 className="font-medium">Cambiar contraseña</h4>
+                    <ContrasenaManual
+                      id={u.id}
+                      clave={claveEdicion.clave}
+                      exigirCambio={claveEdicion.exigirCambio}
+                      onClave={(clave) => setClaveEdicion({ ...claveEdicion, clave })}
+                      onExigirCambio={(exigirCambio) =>
+                        setClaveEdicion({ ...claveEdicion, exigirCambio })
                       }
-                    >
-                      Nueva contraseña temporal
-                    </button>
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        className="boton-primario min-h-10"
+                        onClick={async () => {
+                          if (claveEdicion.clave.length < 10) {
+                            setError('La contraseña debe tener al menos 10 caracteres.');
+                            return;
+                          }
+                          const ok = await cambiar(u, {
+                            contrasena: claveEdicion.clave,
+                            exigir_cambio: claveEdicion.exigirCambio,
+                          });
+                          if (ok)
+                            setAviso(
+                              `✅ Contraseña de ${u.email} cambiada. Su sesión abierta se cerró.`,
+                            );
+                        }}
+                      >
+                        Guardar contraseña
+                      </button>
+                      <button
+                        className="boton-secundario min-h-10"
+                        onClick={() =>
+                          confirm(`¿Generar una contraseña temporal nueva para ${u.email}?`) &&
+                          cambiar(u, { restablecer_contrasena: true })
+                        }
+                      >
+                        Generar una temporal
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
                     <button
                       className="boton-secundario min-h-10"
                       onClick={() =>

@@ -35,7 +35,7 @@ d('API (integración con Postgres)', () => {
       adminEmail: admin.email,
       adminContrasena: admin.contrasena,
       diasSesion: 90,
-      limiteLogin: 10,
+      limiteLogin: 1000,
     };
     await asegurarAdminInicial(pool, cfg, () => {});
     app = await construirApp(cfg, pool, false);
@@ -648,6 +648,54 @@ d('API (integración con Postgres)', () => {
       payload: { email: 'temporal2@tienda.test', contrasena: 'temporal-segura-1' },
     });
     expect(otraVez.statusCode).toBe(200);
+  });
+
+  it('quien crea un usuario puede ponerle la contraseña a mano, al crearlo o después', async () => {
+    const debil = await app.inject({
+      method: 'POST',
+      url: '/api/usuarios',
+      headers: H(),
+      payload: { email: 'manual@tienda.test', contrasena: 'corta' },
+    });
+    expect(debil.json().error).toBe('contrasena_debil');
+
+    // Al crear: contraseña escrita a mano y sin obligar a cambiarla
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/usuarios',
+      headers: H(),
+      payload: {
+        email: 'manual@tienda.test',
+        contrasena: 'escrita-a-mano-1',
+        exigir_cambio: false,
+      },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().contrasena_temporal).toBeUndefined();
+    const h = await entrarComo('manual@tienda.test', 'escrita-a-mano-1');
+    const ok = await app.inject({ method: 'GET', url: '/api/sync/pull?desde=0', headers: h });
+    expect(ok.statusCode).toBe(200);
+
+    // Después: se cambia a mano; la sesión abierta se cierra y la anterior deja de valer
+    const cambio = await app.inject({
+      method: 'PATCH',
+      url: `/api/usuarios/${r.json().id}`,
+      headers: H(),
+      payload: { contrasena: 'otra-escrita-2', exigir_cambio: true },
+    });
+    expect(cambio.statusCode).toBe(200);
+    const cerrada = await app.inject({ method: 'GET', url: '/api/sync/pull?desde=0', headers: h });
+    expect(cerrada.statusCode).toBe(401);
+    const vieja = await app.inject({
+      method: 'POST',
+      url: '/api/auth/entrar',
+      headers: { 'x-inventario': '1' },
+      payload: { email: 'manual@tienda.test', contrasena: 'escrita-a-mano-1' },
+    });
+    expect(vieja.statusCode).toBe(401);
+    const h2 = await entrarComo('manual@tienda.test', 'otra-escrita-2');
+    const yo = await app.inject({ method: 'GET', url: '/api/auth/yo', headers: h2 });
+    expect(yo.json().usuario.debe_cambiar_contrasena).toBe(true);
   });
 
   it('la cookie de sesión es Secure cuando la visita llega por HTTPS (detrás de Traefik)', async () => {
