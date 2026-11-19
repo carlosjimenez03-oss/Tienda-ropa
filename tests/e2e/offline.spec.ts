@@ -38,11 +38,21 @@ async function entrar(pagina: Page, email: string, contrasenas: string[], nueva:
   throw new Error(`No se pudo entrar como ${email}`);
 }
 
+/** La primera vez la app pregunta por los avisos; en las pruebas se responde "Ahora no". */
+async function responderAvisos(pagina: Page) {
+  const ahoraNo = pagina.getByRole('button', { name: 'Ahora no' });
+  await ahoraNo.waitFor({ timeout: 3000 }).then(
+    () => ahoraNo.click(),
+    () => {},
+  );
+}
+
 async function nuevoDispositivo(browser: Browser): Promise<Page> {
   const contexto = await browser.newContext();
   const pagina = await contexto.newPage();
   await pagina.goto('/');
   await entrar(pagina, EMAIL, [CONTRASENA_NUEVA, CONTRASENA], CONTRASENA_NUEVA);
+  await responderAvisos(pagina);
   await expect(pagina.getByRole('heading', { name: 'Resumen' })).toBeVisible();
   // Espera a que el service worker controle la página (necesario para funcionar offline)
   await pagina
@@ -215,6 +225,7 @@ test('quien tiene permiso crea un usuario con permisos limitados y este debe cam
   const b = await contexto.newPage();
   await b.goto('/');
   await entrar(b, email, [temporal], 'cajera-contrasena-1');
+  await responderAvisos(b);
   await expect(b.getByRole('heading', { name: 'Inicio' })).toBeVisible();
   const nav = b.getByRole('navigation');
   await expect(nav.getByRole('link', { name: 'Vender' })).toBeVisible();
@@ -257,4 +268,42 @@ test('se le pone un tiempo de acceso al usuario y luego se edita', async ({ brow
       .filter({ hasText: 'Temporal editado' })
       .getByText(/Acceso hasta/),
   ).toHaveCount(0);
+});
+
+test('al abrir la app por primera vez pregunta por los avisos y no insiste después', async ({
+  browser,
+}) => {
+  const contexto = await browser.newContext();
+  const p = await contexto.newPage();
+  await p.goto('/');
+  await entrar(p, EMAIL, [CONTRASENA_NUEVA, CONTRASENA], CONTRASENA_NUEVA);
+  const dialogo = p.getByRole('dialog', { name: '¿Activar los avisos?' });
+  await expect(dialogo).toBeVisible();
+  await expect(dialogo.getByRole('button', { name: 'Permitir' })).toBeVisible();
+  await dialogo.getByRole('button', { name: 'Ahora no' }).click();
+  await expect(dialogo).toHaveCount(0);
+  await p.reload();
+  await expect(p.getByRole('navigation')).toBeVisible();
+  await expect(p.getByRole('dialog', { name: '¿Activar los avisos?' })).toHaveCount(0);
+
+  await irA(p, 'Ajustes');
+  const fila = p.getByTestId('permiso-Notificaciones');
+  await expect(fila).toContainText('Preguntar cada vez');
+  await expect(fila.getByRole('button', { name: 'Permitir notificaciones' })).toBeVisible();
+});
+
+test('tomar foto explica el permiso, abre la cámara dentro de la app y guarda la foto', async ({
+  browser,
+}) => {
+  const a = await nuevoDispositivo(browser);
+  await irA(a, 'Nuevo');
+  await a.getByRole('button', { name: '📷 Tomar foto' }).click();
+  const explicacion = a.getByRole('dialog', { name: 'Permitir el uso de la cámara' });
+  // Si el navegador ya concedió el permiso se salta la explicación
+  if (await explicacion.isVisible())
+    await explicacion.getByRole('button', { name: 'Continuar' }).click();
+  const camara = a.getByRole('dialog', { name: 'Cámara' });
+  await expect(camara).toBeVisible();
+  await camara.getByRole('button', { name: 'Tomar foto', exact: true }).click();
+  await expect(a.getByAltText('Vista previa')).toBeVisible();
 });

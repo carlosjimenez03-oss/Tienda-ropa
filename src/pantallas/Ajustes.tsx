@@ -13,11 +13,7 @@ import { diaLocal } from '../dominio/resumen';
 import { sincronizar, useEstadoSync } from '../sync/engine';
 import { haceTiempo } from '../componentes/BarraEstado';
 import { esInstalada, esIOS } from '../componentes/AvisoInstalacion';
-import {
-  notificarStockBajo,
-  pedirPermisoNotificaciones,
-  permisoNotificaciones,
-} from '../notificaciones';
+import { PermisosApp } from '../permisos/PermisosApp';
 
 const MENSAJES: Record<string, string> = {
   codigo_invalido: 'El código no es correcto. Revisa la app autenticadora e inténtalo de nuevo.',
@@ -137,54 +133,6 @@ function Sincronizacion() {
           En iPhone/iPad instala la app (Compartir → Añadir a pantalla de inicio) para que Safari no
           borre los datos guardados sin conexión.
         </p>
-      )}
-    </section>
-  );
-}
-
-function Avisos() {
-  const [permiso, setPermiso] = useState(permisoNotificaciones);
-  return (
-    <section className="tarjeta space-y-3">
-      <h2 className="text-lg font-semibold">Avisos de productos por acabarse</h2>
-      <p className="text-sm text-stone-600">
-        Cada producto tiene un número de aviso (por defecto 2). Cuando una venta deja ese número o
-        menos, la app lo muestra en <strong>Inicio</strong> y en la lista de productos. También
-        puede avisarte con una notificación del teléfono o la computadora.
-      </p>
-      {permiso === 'granted' ? (
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-emerald-800">✅ Notificaciones activadas</span>
-          <button
-            className="text-sm underline"
-            onClick={() => notificarStockBajo('Producto de prueba', 1)}
-          >
-            Enviar una de prueba
-          </button>
-        </div>
-      ) : permiso === 'denied' ? (
-        <p className="text-sm text-amber-800">
-          Las notificaciones están bloqueadas. Actívalas en los ajustes del navegador para este
-          sitio.
-        </p>
-      ) : permiso === 'no_disponible' ? (
-        <p className="text-sm text-stone-600">
-          Este navegador no permite notificaciones
-          {esIOS()
-            ? ': en iPhone/iPad instala primero la app (Compartir → Añadir a pantalla de inicio).'
-            : '.'}{' '}
-          Los avisos seguirán apareciendo dentro de la app.
-        </p>
-      ) : (
-        <button
-          className="boton-secundario"
-          onClick={async () => {
-            await pedirPermisoNotificaciones();
-            setPermiso(permisoNotificaciones());
-          }}
-        >
-          🔔 Activar notificaciones
-        </button>
       )}
     </section>
   );
@@ -878,7 +826,7 @@ export function Ajustes() {
           Cerrar sesión
         </button>
       </section>
-      <Avisos />
+      <PermisosApp />
       <Sincronizacion />
       <Seguridad />
       {usuario?.permisos.puede_crear_usuarios && <Usuarios />}

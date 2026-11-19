@@ -4,6 +4,8 @@
  * dentro de la propia pantalla.
  * En iPhone/iPad solo funcionan con la app instalada (iOS 16.4 o superior).
  */
+import { avisosActivos } from './permisos/dispositivo';
+
 export function notificacionesDisponibles(): boolean {
   return typeof Notification !== 'undefined';
 }
@@ -20,6 +22,7 @@ export async function pedirPermisoNotificaciones(): Promise<boolean> {
 
 export async function notificarStockBajo(nombre: string, quedan: number): Promise<void> {
   if (!notificacionesDisponibles() || Notification.permission !== 'granted') return;
+  if (!avisosActivos()) return; // la persona los apagó desde Ajustes → Permisos
   const titulo = quedan <= 0 ? `Se agotó: ${nombre}` : `Se está acabando: ${nombre}`;
   const opciones: NotificationOptions = {
     body:

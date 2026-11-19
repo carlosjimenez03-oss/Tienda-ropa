@@ -12,7 +12,11 @@ export default defineConfig({
     baseURL: process.env.BASE_URL ?? 'http://localhost:3000',
     locale: 'es-DO',
     timezoneId: 'America/Santo_Domingo',
-    launchOptions: process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {},
+    launchOptions: {
+      ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+      // Cámara simulada que acepta el permiso automáticamente (pruebas de fotos)
+      args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
+    },
   },
   projects: [
     { name: 'escritorio', use: { ...devices['Desktop Chrome'] } },

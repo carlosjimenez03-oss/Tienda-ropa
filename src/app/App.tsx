@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Navigate, NavLink, Route, Routes } from 'react-router-dom';
 import { usePermisos, useSesion } from '../auth/sesion';
 import { CambioObligatorio } from '../auth/CambioObligatorio';
+import { PreguntaAvisos } from '../permisos/PreguntaAvisos';
 import type { Permiso } from '../../shared/permisos';
 import { Login } from '../auth/Login';
 import { iniciarMotor } from '../sync/engine';
@@ -83,6 +84,7 @@ export function App() {
         ))}
       </nav>
       <div className="flex-1 pb-24 md:pb-0">
+        <PreguntaAvisos />
         <BarraEstado />
         <AvisoInstalacion />
         <main className="mx-auto max-w-5xl p-4 md:p-6">
