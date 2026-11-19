@@ -1,0 +1,69 @@
+# Paquete completo: aplicación + Postgres + copias de seguridad diarias.
+# En Dokploy: crear un servicio "Docker Compose" apuntando a este repositorio,
+# pegar las variables de .env.example en la pestaña Environment y asignar el
+# dominio al servicio "app", puerto 3000 (Dokploy gestiona HTTPS con Traefik).
+services:
+  app:
+    build: .
+    init: true
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-inventario}:${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-inventario}
+      PUBLIC_URL: ${PUBLIC_URL:?Define PUBLIC_URL (https://tu-dominio)}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      APPLE_CLIENT_ID: ${APPLE_CLIENT_ID:-}
+      APPLE_TEAM_ID: ${APPLE_TEAM_ID:-}
+      APPLE_KEY_ID: ${APPLE_KEY_ID:-}
+      APPLE_PRIVATE_KEY: ${APPLE_PRIVATE_KEY:-}
+      SESSION_DAYS: ${SESSION_DAYS:-90}
+    volumes:
+      - uploads:/data/uploads
+    expose:
+      - '3000'
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-inventario}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-inventario}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Copia diaria de la base y de las fotos; conserva los últimos BACKUP_KEEP_DAYS días.
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-inventario}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-inventario}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      TZ: America/Santo_Domingo
+    volumes:
+      - backups:/backups
+      - uploads:/data/uploads:ro
+
+volumes:
+  pgdata:
+  uploads:
+  backups:

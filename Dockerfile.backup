@@ -1,0 +1,3 @@
+FROM postgres:16-alpine
+COPY scripts/backup.sh /backup.sh
+ENTRYPOINT ["/bin/sh", "/backup.sh"]
