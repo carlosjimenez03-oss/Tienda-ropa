@@ -3,12 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { crearProducto } from '../dominio/operaciones';
 import { programarSync } from '../sync/engine';
 import { CampoImagen } from '../componentes/CampoImagen';
-import { aDatos, CamposProducto, formVacio } from '../componentes/FormProducto';
+import { aDatos, aNumero, CamposProducto, formVacio } from '../componentes/FormProducto';
 
 export function NuevoProducto() {
   const navegar = useNavigate();
   const [v, setV] = useState(formVacio);
   const [cantidad, setCantidad] = useState('1');
+  const [costo, setCosto] = useState('');
   const [imagen, setImagen] = useState<Blob | null>(null);
   const [error, setError] = useState('');
   const [guardando, setGuardando] = useState(false);
@@ -21,10 +22,11 @@ export function NuevoProducto() {
       const { producto } = await crearProducto({
         ...aDatos(v),
         cantidadInicial: Number(cantidad || 0),
+        costoUnitario: aNumero(costo, 'Costo'),
         imagen,
       });
       programarSync();
-      navegar(`/producto/${producto.id}`, { replace: true });
+      navegar(`/producto/${producto.id}`, { replace: true, state: { creado: true } });
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -34,12 +36,15 @@ export function NuevoProducto() {
 
   return (
     <form onSubmit={guardar} className="mx-auto max-w-xl space-y-4">
-      <h1 className="text-2xl font-bold">Nuevo producto</h1>
+      <h1 className="text-2xl font-bold">Agregar un producto</h1>
+      <p className="text-stone-600">
+        Solo el nombre es obligatorio. Lo demás puedes completarlo después.
+      </p>
       <div className="tarjeta space-y-4">
         <CamposProducto v={v} set={setV} />
         <div>
-          <label className="etiqueta" htmlFor="cantidad">
-            Cantidad inicial
+          <label className="etiqueta text-base" htmlFor="cantidad">
+            ¿Cuántas unidades tienes?
           </label>
           <input
             id="cantidad"
@@ -52,7 +57,23 @@ export function NuevoProducto() {
             onChange={(e) => setCantidad(e.target.value)}
           />
           <p className="mt-1 text-xs text-stone-500">
-            Se crea un lote automáticamente con esta cantidad.
+            Se le asigna un código de lote automáticamente; no tienes que hacer nada.
+          </p>
+        </div>
+        <div>
+          <label className="etiqueta" htmlFor="costo">
+            ¿Cuánto te costó cada una? (opcional)
+          </label>
+          <input
+            id="costo"
+            className="campo"
+            inputMode="decimal"
+            placeholder="Ej.: 600"
+            value={costo}
+            onChange={(e) => setCosto(e.target.value)}
+          />
+          <p className="mt-1 text-xs text-stone-500">
+            Sirve para ver en el Resumen cuánto has comprado.
           </p>
         </div>
         <CampoImagen onCambio={setImagen} />

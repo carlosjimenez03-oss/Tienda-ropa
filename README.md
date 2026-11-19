@@ -1,8 +1,9 @@
 # Inventario — tienda de ropa y accesorios
 
 PWA instalable en PC, Android, iPhone y tablet para llevar el inventario de una tienda:
-alta de productos con lote automático y foto, entradas y ventas, **funciona sin internet**
-y se sincroniza sola al recuperar la conexión.
+alta de productos con lote automático y foto, ventas y mercancía que llega, **aviso de
+productos que se están acabando**, un **resumen** de lo vendido y lo comprado, y usuarios con
+permisos. **Funciona sin internet** y se sincroniza sola al recuperar la conexión.
 
 Todo va en **un solo paquete Docker Compose** (aplicación + PostgreSQL + copias de seguridad),
 listo para desplegar en [Dokploy](https://dokploy.com).
@@ -14,7 +15,7 @@ listo para desplegar en [Dokploy](https://dokploy.com).
 | Base local    | Dexie.js sobre IndexedDB + cola _outbox_                                  |
 | Servidor      | Node 22 + Fastify 5 (API, login y archivos estáticos en el mismo proceso) |
 | Base de datos | PostgreSQL 16 (contenedor incluido)                                       |
-| Login         | Correo/contraseña, Google, Sign in with Apple, 2FA TOTP opcional          |
+| Login         | Correo y contraseña, permisos por persona, 2FA TOTP opcional              |
 | Pruebas       | Vitest (unitarias + API contra Postgres real) y Playwright (E2E offline)  |
 
 ---
@@ -29,13 +30,14 @@ listo para desplegar en [Dokploy](https://dokploy.com).
    ```
    PUBLIC_URL=https://inventario.tu-dominio.com
    POSTGRES_PASSWORD=<clave larga aleatoria>
-   ADMIN_EMAIL=<correo de la dueña>
-   ADMIN_PASSWORD=<contraseña de 10+ caracteres>
+   ADMIN_EMAIL=<tu correo>
+   ADMIN_PASSWORD=<contraseña temporal de 10+ caracteres>
    ```
 4. Pestaña **Domains**: añade el dominio → servicio `app`, puerto `3000`, HTTPS activado (Let's Encrypt).
-5. **Deploy.** Al arrancar, la app espera a Postgres, aplica las migraciones y crea la cuenta de
-   administración con `ADMIN_EMAIL`/`ADMIN_PASSWORD` (solo si la base está vacía).
-6. Abre `https://inventario.tu-dominio.com` y entra con esa cuenta.
+5. **Deploy.** Al arrancar, la app espera a Postgres, aplica las migraciones y crea la cuenta
+   **propietaria** (todos los permisos) con `ADMIN_EMAIL`/`ADMIN_PASSWORD`, solo si la base está vacía.
+6. Abre `https://inventario.tu-dominio.com` y entra con esa cuenta. La app te pedirá **crear tu
+   propia contraseña** antes de continuar; la de `ADMIN_PASSWORD` deja de funcionar.
 
 Volúmenes que crea el compose (persisten entre despliegues):
 
@@ -61,39 +63,54 @@ Para exponer el puerto en local añade `ports: ['3000:3000']` al servicio `app` 
 
 ---
 
-## 2. Crear usuarias
+## 2. Usuarios y permisos
 
-- La primera cuenta (administración) se crea con `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
-- Después: **Ajustes → Usuarias → Dar de alta** (correo, nombre, contraseña opcional, rol).
-- **No hay registro público.** Para entrar con Google o Apple, el correo debe estar dado de alta antes;
-  en el primer inicio de sesión la cuenta externa queda vinculada.
-- Desde la misma pantalla se puede desactivar una cuenta, cambiar su contraseña o quitarle el 2FA.
+- **No hay registro público** ni inicio de sesión con Google/Apple: solo correo y contraseña.
+- La cuenta propietaria se crea con `ADMIN_EMAIL` / `ADMIN_PASSWORD` y tiene todos los permisos.
+  No se le pueden quitar ni desactivar.
+- **Ajustes → Usuarios → + Crear usuario**: correo, nombre y casillas de permisos. La app genera una
+  **contraseña temporal** (p. ej. `k7mq-2xpa-rt9h`) que se muestra una sola vez para entregarla a la
+  persona. Al entrar por primera vez, la app le **obliga a crear su propia contraseña**.
+
+| Permiso                  | Qué permite                                             |
+| ------------------------ | ------------------------------------------------------- |
+| Vender                   | Registrar ventas y deshacerlas                          |
+| Agregar mercancía        | Registrar la mercancía que llega y crear lotes nuevos   |
+| Crear y editar productos | Agregar productos, cambiar precios y fotos, eliminarlos |
+| Ver el resumen           | Ver cuánto se ha vendido y comprado                     |
+| Crear usuarios           | Dar de alta a otras personas y darles permisos          |
+
+Reglas (las aplica el servidor, no solo la pantalla):
+
+- Quien tiene **Crear usuarios** solo puede dar los permisos que **él mismo tiene**, incluido el de
+  crear usuarios. Así decides si alguien que creas puede crear a otros o no.
+- La cuenta propietaria gestiona a todos; los demás solo a las personas que ellos crearon.
+- Nadie puede cambiarse sus propios permisos.
+- Desde **Gestionar** se cambian permisos, se genera una contraseña temporal nueva (obliga a
+  cambiarla otra vez), se desactiva la cuenta o se quita la verificación en dos pasos.
 - Cada persona puede activar la **verificación en dos pasos** en _Ajustes → Seguridad_
   (Google Authenticator, Microsoft Authenticator, 1Password…).
 
 Protecciones del login: máximo 10 intentos por minuto por IP (`LOGIN_RATE_LIMIT`) y bloqueo de la
 cuenta 15 minutos tras 5 contraseñas incorrectas seguidas.
 
-### Login con Google (opcional)
+### Avisos de productos por acabarse
 
-1. [Google Cloud Console](https://console.cloud.google.com/) → _APIs y servicios → Credenciales →
-   Crear ID de cliente de OAuth_ (tipo **Aplicación web**).
-2. _URI de redireccionamiento autorizado_: `https://TU-DOMINIO/api/auth/google/callback`.
-3. Copia el ID y el secreto en `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` y vuelve a desplegar.
+Cada producto tiene un campo **"Avisarme cuando queden N unidades o menos"** (2 por defecto). Cuando
+el stock llega a ese número:
 
-### Sign in with Apple (opcional)
+- aparece en **Inicio** con un botón **Reponer**, con un contador en el menú;
+- se marca **⚠️ Quedan pocos** o **🚫 Agotado** en la lista de productos (filtro _Por reponer_);
+- al registrar la venta se muestra el aviso y, si se activaron en _Ajustes → Avisos_, llega una
+  **notificación** al teléfono o la PC (en iPhone/iPad requiere la app instalada, iOS 16.4+).
 
-Requiere una cuenta de Apple Developer (99 USD/año). Revisa la documentación vigente de Apple antes de empezar.
+### Resumen (panel)
 
-1. _Certificates, IDs & Profiles → Identifiers_: crea un **App ID** con _Sign in with Apple_ activado.
-2. Crea un **Services ID** (será `APPLE_CLIENT_ID`), activa _Sign in with Apple_ y configura:
-   - _Domains_: `TU-DOMINIO`
-   - _Return URLs_: `https://TU-DOMINIO/api/auth/apple/callback`
-3. _Keys_: crea una clave con _Sign in with Apple_, descarga el `.p8` y anota el _Key ID_.
-4. Variables: `APPLE_CLIENT_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID` y `APPLE_PRIVATE_KEY`
-   (el contenido del `.p8` en una sola línea, sustituyendo los saltos de línea por `\n`).
-
-Los botones de Google/Apple solo aparecen en la pantalla de login si sus variables están definidas.
+En **Inicio**, quien tenga el permiso _Ver el resumen_ ve, para hoy / 7 días / este mes / 30 días:
+lo **vendido** (RD$ y unidades), lo **comprado** (mercancía que llegó, con su costo si se anotó), las
+unidades y el valor del inventario, las ventas por día, lo más vendido y los últimos movimientos.
+Cada venta guarda el precio al que se vendió (se puede cambiar si hubo descuento) y cada entrada
+puede guardar su costo.
 
 ---
 

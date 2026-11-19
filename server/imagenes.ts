@@ -39,7 +39,10 @@ export async function rutasImagenes(
 
   app.put<{ Params: { id: string }; Querystring: { producto_id?: string } }>(
     '/api/imagenes/:id',
-    { preHandler: requerirSesion(pool), bodyLimit: MAX_BYTES },
+    {
+      preHandler: requerirSesion(pool, { permiso: 'puede_editar_productos' }),
+      bodyLimit: MAX_BYTES,
+    },
     async (req, reply) => {
       const ids = z.object({ id: z.string().uuid(), producto_id: z.string().uuid() }).safeParse({
         id: req.params.id,

@@ -1,6 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
-import formbody from '@fastify/formbody';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
@@ -11,9 +10,6 @@ import type { Pool } from './db.js';
 import { rutasAuth } from './auth/rutas.js';
 import { rutasSync } from './sync.js';
 import { rutasImagenes } from './imagenes.js';
-
-/** Rutas que reciben navegación de terceros (sin cabecera personalizada). */
-const SIN_CABECERA_CSRF = new Set(['/api/auth/apple/callback']);
 
 export async function construirApp(
   cfg: Config,
@@ -50,7 +46,6 @@ export async function construirApp(
     hsts: cfg.urlPublica.startsWith('https://') ? { maxAge: 31536000 } : false,
   });
   await app.register(cookie);
-  await app.register(formbody);
   await app.register(rateLimit, { global: false });
 
   // Protección CSRF: las peticiones que modifican datos deben llevar una cabecera
@@ -58,7 +53,6 @@ export async function construirApp(
   app.addHook('onRequest', async (req, reply) => {
     if (!req.url.startsWith('/api/')) return;
     if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return;
-    if (SIN_CABECERA_CSRF.has(req.url.split('?')[0])) return;
     if (req.headers['x-inventario'] !== '1') {
       return reply.code(403).send({ error: 'cabecera_requerida' });
     }

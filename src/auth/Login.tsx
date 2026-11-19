@@ -9,10 +9,6 @@ const ERRORES: Record<string, string> = {
   credenciales_invalidas: 'Correo o contraseña incorrectos.',
   cuenta_bloqueada_temporalmente: 'Demasiados intentos. Espera 15 minutos e inténtalo de nuevo.',
   codigo_invalido: 'El código no es válido.',
-  cuenta_no_autorizada: 'Esa cuenta no está autorizada. Pide a administración que te dé de alta.',
-  oauth_estado: 'El inicio de sesión caducó. Inténtalo de nuevo.',
-  oauth_google: 'No se pudo entrar con Google.',
-  oauth_apple: 'No se pudo entrar con Apple.',
   datos_invalidos: 'Revisa los datos.',
   http_429: 'Demasiados intentos. Espera un minuto.',
 };
@@ -34,25 +30,10 @@ export function Login({ expirada }: { expirada?: UsuarioPublico }) {
     params.get('error') ? mensaje(new ErrorApi(0, params.get('error')!)) : '',
   );
   const [enviando, setEnviando] = useState(false);
-  const [proveedores, setProveedores] = useState<{ google: boolean; apple: boolean }>(() => {
-    try {
-      return (
-        JSON.parse(localStorage.getItem('proveedores') ?? '') ?? { google: false, apple: false }
-      );
-    } catch {
-      return { google: false, apple: false };
-    }
-  });
   const pendientes = useLiveQuery(() => db.outbox.count(), [], 0);
 
   useEffect(() => {
     if (params.has('error') || params.has('mfa')) history.replaceState(null, '', '/');
-    api<{ google: boolean; apple: boolean }>('/api/auth/proveedores')
-      .then((p) => {
-        setProveedores(p);
-        localStorage.setItem('proveedores', JSON.stringify(p));
-      })
-      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -172,27 +153,6 @@ export function Login({ expirada }: { expirada?: UsuarioPublico }) {
             </button>
           )}
         </form>
-
-        {!pasoMfa && (proveedores.google || proveedores.apple) && (
-          <div className="mt-4 space-y-3">
-            {proveedores.google && (
-              <a href="/api/auth/google" className="boton-secundario w-full">
-                <span aria-hidden className="font-bold text-blue-600">
-                  G
-                </span>{' '}
-                Continuar con Google
-              </a>
-            )}
-            {proveedores.apple && (
-              <a
-                href="/api/auth/apple"
-                className="boton w-full bg-black text-white hover:bg-stone-800"
-              >
-                <span aria-hidden></span> Continuar con Apple
-              </a>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );

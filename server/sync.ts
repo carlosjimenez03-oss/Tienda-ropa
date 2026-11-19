@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Cliente, Pool } from './db.js';
-import { requerirSesion } from './auth/rutas.js';
+import { permisosDe, requerirSesion } from './auth/rutas.js';
+import type { Permisos } from '../shared/permisos.js';
 import { generarCodigoLote } from '../shared/lote.js';
 import {
   anulacionEsquema,
@@ -19,24 +20,31 @@ const CANDADO_ESCRITURA = 727002;
 class ErrorPermanente extends Error {}
 class ErrorReintentable extends Error {}
 
+function exigir(ok: boolean, accion: string) {
+  if (!ok) throw new ErrorPermanente(`Tu usuario no tiene permiso para ${accion}`);
+}
+
 async function aplicarCambio(
   c: Cliente,
   usuarioId: string,
+  permisos: Permisos,
   tabla: string,
   operacion: string,
   payload: unknown,
 ): Promise<void> {
+  const puedeEntrada = permisos.puede_agregar_mercancia || permisos.puede_editar_productos;
   if (tabla === 'productos') {
     const p = productoEsquema.safeParse(payload);
     if (!p.success) throw new ErrorPermanente(`producto inválido: ${p.error.issues[0]?.message}`);
     const d = p.data;
+    exigir(permisos.puede_editar_productos, 'crear o editar productos');
     // Último gana por actualizado_en
     await c.query(
-      `insert into productos (id, nombre, sku, talla, color, precio, creado_por, creado_en, actualizado_en, eliminado)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `insert into productos (id, nombre, sku, talla, color, precio, creado_por, creado_en, actualizado_en, eliminado, stock_minimo)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        on conflict (id) do update set
          nombre = excluded.nombre, sku = excluded.sku, talla = excluded.talla, color = excluded.color,
-         precio = excluded.precio, actualizado_en = excluded.actualizado_en, eliminado = excluded.eliminado
+         precio = excluded.precio, stock_minimo = excluded.stock_minimo, actualizado_en = excluded.actualizado_en, eliminado = excluded.eliminado
        where productos.actualizado_en < excluded.actualizado_en`,
       [
         d.id,
@@ -49,6 +57,7 @@ async function aplicarCambio(
         d.creado_en,
         d.actualizado_en,
         d.eliminado,
+        d.stock_minimo,
       ],
     );
     return;
@@ -57,6 +66,7 @@ async function aplicarCambio(
     const p = loteEsquema.safeParse(payload);
     if (!p.success) throw new ErrorPermanente(`lote inválido: ${p.error.issues[0]?.message}`);
     const d = p.data;
+    exigir(puedeEntrada, 'agregar mercancía');
     let codigo = d.codigo;
     for (let intento = 0; intento < 5; intento++) {
       await c.query('savepoint lote');
@@ -85,16 +95,39 @@ async function aplicarCambio(
     const p = movimientoEsquema.safeParse(payload);
     if (!p.success) throw new ErrorPermanente(`movimiento inválido: ${p.error.issues[0]?.message}`);
     const d = p.data;
+    exigir(
+      d.tipo === 'salida' ? permisos.puede_vender : puedeEntrada,
+      d.tipo === 'salida' ? 'vender' : 'agregar mercancía',
+    );
     await c.query(
-      `insert into movimientos (id, lote_id, tipo, cantidad, nota, usuario_id, ocurrido_en, eliminado)
-       values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (id) do nothing`,
-      [d.id, d.lote_id, d.tipo, d.cantidad, d.nota ?? null, usuarioId, d.ocurrido_en, d.eliminado],
+      `insert into movimientos (id, lote_id, tipo, cantidad, nota, usuario_id, ocurrido_en, eliminado, precio_unitario)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (id) do nothing`,
+      [
+        d.id,
+        d.lote_id,
+        d.tipo,
+        d.cantidad,
+        d.nota ?? null,
+        usuarioId,
+        d.ocurrido_en,
+        d.eliminado,
+        d.precio_unitario ?? null,
+      ],
     );
     return;
   }
   if (tabla === 'movimientos' && operacion === 'anular') {
     const p = anulacionEsquema.safeParse(payload);
     if (!p.success) throw new ErrorPermanente('anulación inválida');
+    const previo = await c.query<{ tipo: string }>('select tipo from movimientos where id = $1', [
+      p.data.id,
+    ]);
+    if (previo.rows[0]) {
+      exigir(
+        previo.rows[0].tipo === 'salida' ? permisos.puede_vender : puedeEntrada,
+        'deshacer este movimiento',
+      );
+    }
     const r = await c.query(
       'update movimientos set eliminado = true where id = $1 and not eliminado',
       [p.data.id],
@@ -111,6 +144,7 @@ async function aplicarCambio(
 export async function procesarPush(
   pool: Pool,
   usuarioId: string,
+  permisos: Permisos,
   cambios: z.infer<typeof pushEsquema>['cambios'],
 ): Promise<ResultadoCambio[]> {
   const resultados: ResultadoCambio[] = [];
@@ -121,7 +155,7 @@ export async function procesarPush(
     for (const cambio of cambios) {
       await c.query('savepoint cambio');
       try {
-        await aplicarCambio(c, usuarioId, cambio.tabla, cambio.operacion, cambio.payload);
+        await aplicarCambio(c, usuarioId, permisos, cambio.tabla, cambio.operacion, cambio.payload);
         await c.query('release savepoint cambio');
         resultados.push({ id: cambio.id, estado: 'ok' });
       } catch (e) {
@@ -151,10 +185,10 @@ export async function procesarPush(
 
 const TABLAS_PULL = {
   productos:
-    'select id, nombre, sku, talla, color, precio, creado_por, creado_en, actualizado_en, eliminado, version from productos',
+    'select id, nombre, sku, talla, color, precio, stock_minimo, creado_por, creado_en, actualizado_en, eliminado, version from productos',
   lotes: 'select id, codigo, producto_id, creado_por, creado_en, version from lotes',
   movimientos:
-    'select id, lote_id, tipo, cantidad, nota, usuario_id, ocurrido_en, sincronizado_en, eliminado, version from movimientos',
+    'select id, lote_id, tipo, cantidad, nota, precio_unitario, usuario_id, ocurrido_en, sincronizado_en, eliminado, version from movimientos',
   imagenes: 'select id, producto_id, ruta, creado_en, eliminado, version from imagenes',
 } as const;
 
@@ -195,7 +229,12 @@ export async function rutasSync(app: FastifyInstance, opts: { pool: Pool }) {
       const datos = pushEsquema.safeParse(req.body);
       if (!datos.success)
         return reply.code(400).send({ error: 'datos_invalidos', detalle: datos.error.issues });
-      const resultados = await procesarPush(pool, req.sesion!.usuario.id, datos.data.cambios);
+      const resultados = await procesarPush(
+        pool,
+        req.sesion!.usuario.id,
+        permisosDe(req.sesion!.usuario),
+        datos.data.cambios,
+      );
       return { resultados };
     },
   );

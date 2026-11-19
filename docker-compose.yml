@@ -15,12 +15,6 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:?Define PUBLIC_URL (https://tu-dominio)}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      APPLE_CLIENT_ID: ${APPLE_CLIENT_ID:-}
-      APPLE_TEAM_ID: ${APPLE_TEAM_ID:-}
-      APPLE_KEY_ID: ${APPLE_KEY_ID:-}
-      APPLE_PRIVATE_KEY: ${APPLE_PRIVATE_KEY:-}
       SESSION_DAYS: ${SESSION_DAYS:-90}
     volumes:
       - uploads:/data/uploads

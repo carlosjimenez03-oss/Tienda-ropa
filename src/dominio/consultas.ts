@@ -2,10 +2,21 @@ import { db } from '../db/local';
 import { stockPorLote } from '../../shared/stock';
 import type { Lote, Producto } from '../../shared/esquemas';
 
+export type EstadoStock = 'agotado' | 'por_acabarse' | 'ok';
+
+export function estadoStock(stock: number, minimo: number): EstadoStock {
+  if (stock <= 0) return 'agotado';
+  if (stock <= minimo) return 'por_acabarse';
+  return 'ok';
+}
+
 export interface FilaProducto {
   producto: Producto;
   lotes: Lote[];
   stock: number;
+  /** Aviso cuando quedan esta cantidad o menos */
+  minimo: number;
+  estado: EstadoStock;
   imagenId?: string;
   /** Texto normalizado para buscar */
   indice: string;
@@ -41,10 +52,14 @@ export async function cargarProductos(): Promise<FilaProducto[]> {
       const ls = (lotesPorProducto.get(producto.id) ?? []).sort((a, b) =>
         b.creado_en.localeCompare(a.creado_en),
       );
+      const total = ls.reduce((s, l) => s + (stock.get(l.id) ?? 0), 0);
+      const minimo = producto.stock_minimo ?? 2;
       return {
         producto,
         lotes: ls,
-        stock: ls.reduce((s, l) => s + (stock.get(l.id) ?? 0), 0),
+        stock: total,
+        minimo,
+        estado: estadoStock(total, minimo),
         imagenId: imagenPorProducto.get(producto.id),
         indice: normalizar(
           [

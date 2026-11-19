@@ -1,17 +1,10 @@
+import { randomInt } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import QRCode from 'qrcode';
 import { z } from 'zod';
 import type { Config } from '../config.js';
 import type { Pool } from '../db.js';
 import { contrasenaValida, hashContrasena, verificarContrasena } from './contrasena.js';
-import {
-  aleatorioUrl,
-  canjearCodigoApple,
-  canjearCodigoGoogle,
-  urlAutorizacionApple,
-  urlAutorizacionGoogle,
-  type IdentidadExterna,
-} from './oauth.js';
 import {
   cerrarSesion,
   crearSesion,
@@ -21,6 +14,12 @@ import {
   type SesionActual,
 } from './sesiones.js';
 import { nuevoSecreto, totpPara, verificarCodigo } from './totp.js';
+import {
+  PERMISOS,
+  PERMISOS_POR_DEFECTO,
+  type Permiso,
+  type Permisos,
+} from '../../shared/permisos.js';
 
 const MAX_INTENTOS = 5;
 const MINUTOS_BLOQUEO = 15;
@@ -31,22 +30,38 @@ declare module 'fastify' {
   }
 }
 
-export function requerirSesion(pool: Pool) {
+export function permisosDe(u: FilaUsuario): Permisos {
+  return usuarioPublico(u).permisos;
+}
+
+/** Contraseña temporal fácil de dictar: 3 grupos de 4 caracteres sin ambiguos. */
+export function contrasenaTemporal(): string {
+  const alfabeto = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const grupo = () =>
+    Array.from({ length: 4 }, () => alfabeto[randomInt(alfabeto.length)]).join('');
+  return `${grupo()}-${grupo()}-${grupo()}`;
+}
+
+/**
+ * Exige sesión válida. Si la persona tiene pendiente cambiar la contraseña solo
+ * puede usar las rutas marcadas con `permitirCambioPendiente`.
+ */
+export function requerirSesion(
+  pool: Pool,
+  opciones: { permiso?: Permiso; permitirCambioPendiente?: boolean } = {},
+) {
   return async (req: FastifyRequest, reply: FastifyReply) => {
     const sesion = await leerSesion(pool, req);
     if (!sesion || sesion.mfaPendiente) {
       return reply.code(401).send({ error: 'sesion_requerida' });
     }
+    if (sesion.usuario.debe_cambiar_contrasena && !opciones.permitirCambioPendiente) {
+      return reply.code(403).send({ error: 'debe_cambiar_contrasena' });
+    }
+    if (opciones.permiso && !permisosDe(sesion.usuario)[opciones.permiso]) {
+      return reply.code(403).send({ error: 'sin_permiso' });
+    }
     req.sesion = sesion;
-  };
-}
-
-export function requerirAdmin(pool: Pool) {
-  const base = requerirSesion(pool);
-  return async (req: FastifyRequest, reply: FastifyReply) => {
-    await base(req, reply);
-    if (reply.sent) return;
-    if (req.sesion!.usuario.rol !== 'admin') return reply.code(403).send({ error: 'solo_admin' });
   };
 }
 
@@ -55,17 +70,27 @@ const loginEsquema = z.object({
   contrasena: z.string().min(1).max(200),
 });
 const codigoEsquema = z.object({ codigo: z.string().trim().min(6).max(10) });
-const nuevaUsuariaEsquema = z.object({
+const permisosEsquema = z
+  .object(Object.fromEntries(PERMISOS.map((p) => [p, z.boolean().optional()])))
+  .partial();
+const nuevoUsuarioEsquema = z.object({
   email: z.string().trim().toLowerCase().email().max(254),
   nombre: z.string().trim().max(120).default(''),
-  contrasena: z.string().optional(),
-  rol: z.enum(['admin', 'usuaria']).default('usuaria'),
+  permisos: permisosEsquema.default({}),
+});
+const cambioUsuarioEsquema = z.object({
+  activo: z.boolean().optional(),
+  nombre: z.string().trim().max(120).optional(),
+  permisos: permisosEsquema.optional(),
+  restablecer_contrasena: z.boolean().optional(),
+  quitar_mfa: z.boolean().optional(),
 });
 const cambioContrasenaEsquema = z.object({
-  actual: z.string().max(200).optional(),
+  actual: z.string().max(200),
   nueva: z.string(),
 });
 
+/** Crea la cuenta propietaria (todos los permisos) si la base no tiene usuarios. */
 export async function asegurarAdminInicial(pool: Pool, cfg: Config, log: (m: string) => void) {
   if (!cfg.adminEmail || !cfg.adminContrasena) return;
   const { rows } = await pool.query('select count(*)::int as n from usuarios');
@@ -73,10 +98,12 @@ export async function asegurarAdminInicial(pool: Pool, cfg: Config, log: (m: str
   const error = contrasenaValida(cfg.adminContrasena);
   if (error) throw new Error(`ADMIN_PASSWORD inválida: ${error}`);
   await pool.query(
-    `insert into usuarios (email, nombre, hash_contrasena, rol) values ($1, 'Administración', $2, 'admin')`,
+    `insert into usuarios (email, nombre, hash_contrasena, es_propietario, debe_cambiar_contrasena,
+       puede_vender, puede_agregar_mercancia, puede_editar_productos, puede_ver_resumen, puede_crear_usuarios)
+     values ($1, 'Propietario', $2, true, true, true, true, true, true, true)`,
     [cfg.adminEmail, await hashContrasena(cfg.adminContrasena)],
   );
-  log(`usuaria administradora creada: ${cfg.adminEmail}`);
+  log(`cuenta propietaria creada: ${cfg.adminEmail} (debe cambiar la contraseña al entrar)`);
 }
 
 export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: Config }) {
@@ -88,11 +115,9 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
     seguro,
   });
   const limiteLogin = { config: { rateLimit: { max: cfg.limiteLogin, timeWindow: '1 minute' } } };
-
-  app.get('/api/auth/proveedores', async () => ({
-    google: Boolean(cfg.google),
-    apple: Boolean(cfg.apple),
-  }));
+  const conSesion = requerirSesion(pool);
+  const conSesionPendiente = requerirSesion(pool, { permitirCambioPendiente: true });
+  const gestionUsuarios = requerirSesion(pool, { permiso: 'puede_crear_usuarios' });
 
   app.get('/api/auth/yo', async (req, reply) => {
     const sesion = await leerSesion(pool, req);
@@ -155,8 +180,33 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
     return { ok: true };
   });
 
+  app.post('/api/auth/contrasena', { preHandler: conSesionPendiente }, async (req, reply) => {
+    const u = req.sesion!.usuario;
+    const datos = cambioContrasenaEsquema.safeParse(req.body);
+    if (!datos.success) return reply.code(400).send({ error: 'datos_invalidos' });
+    const error = contrasenaValida(datos.data.nueva);
+    if (error) return reply.code(400).send({ error: 'contrasena_debil', mensaje: error });
+    if (!(await verificarContrasena(datos.data.actual, u.hash_contrasena))) {
+      return reply.code(401).send({ error: 'contrasena_actual_incorrecta' });
+    }
+    if (datos.data.actual === datos.data.nueva) {
+      return reply.code(400).send({ error: 'contrasena_repetida' });
+    }
+    const { rows } = await pool.query<FilaUsuario>(
+      `update usuarios set hash_contrasena = $2, debe_cambiar_contrasena = false
+        where id = $1 returning *`,
+      [u.id, await hashContrasena(datos.data.nueva)],
+    );
+    // Cierra las demás sesiones
+    await pool.query('delete from sesiones where usuario_id = $1 and id <> $2', [
+      u.id,
+      req.sesion!.tokenHash,
+    ]);
+    return { ok: true, usuario: usuarioPublico(rows[0]) };
+  });
+
   // ---------- MFA (TOTP) ----------
-  app.post('/api/auth/mfa/configurar', { preHandler: requerirSesion(pool) }, async (req) => {
+  app.post('/api/auth/mfa/configurar', { preHandler: conSesion }, async (req) => {
     const u = req.sesion!.usuario;
     if (u.totp_activo) return { ya_activo: true };
     const secreto = nuevoSecreto();
@@ -165,7 +215,7 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
     return { secreto, uri, qr: await QRCode.toDataURL(uri) };
   });
 
-  app.post('/api/auth/mfa/activar', { preHandler: requerirSesion(pool) }, async (req, reply) => {
+  app.post('/api/auth/mfa/activar', { preHandler: conSesion }, async (req, reply) => {
     const u = req.sesion!.usuario;
     const datos = codigoEsquema.safeParse(req.body);
     if (
@@ -179,7 +229,7 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
     return { ok: true };
   });
 
-  app.post('/api/auth/mfa/desactivar', { preHandler: requerirSesion(pool) }, async (req, reply) => {
+  app.post('/api/auth/mfa/desactivar', { preHandler: conSesion }, async (req, reply) => {
     const u = req.sesion!.usuario;
     const datos = codigoEsquema.safeParse(req.body);
     if (
@@ -195,56 +245,71 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
     return { ok: true };
   });
 
-  app.post('/api/auth/contrasena', { preHandler: requerirSesion(pool) }, async (req, reply) => {
-    const u = req.sesion!.usuario;
-    const datos = cambioContrasenaEsquema.safeParse(req.body);
-    if (!datos.success) return reply.code(400).send({ error: 'datos_invalidos' });
-    const error = contrasenaValida(datos.data.nueva);
-    if (error) return reply.code(400).send({ error: 'contrasena_debil', mensaje: error });
-    if (
-      u.hash_contrasena &&
-      !(await verificarContrasena(datos.data.actual ?? '', u.hash_contrasena))
-    ) {
-      return reply.code(401).send({ error: 'contrasena_actual_incorrecta' });
-    }
-    await pool.query('update usuarios set hash_contrasena = $2 where id = $1', [
-      u.id,
-      await hashContrasena(datos.data.nueva),
-    ]);
-    // Cierra las demás sesiones
-    await pool.query('delete from sesiones where usuario_id = $1 and id <> $2', [
-      u.id,
-      req.sesion!.tokenHash,
-    ]);
-    return { ok: true };
-  });
+  // ---------- Usuarios y permisos ----------
+  /**
+   * Reglas:
+   * - Solo quien tiene "crear usuarios" entra aquí.
+   * - Solo se pueden dar permisos que uno mismo tiene (nadie se da más de lo que tiene).
+   * - La cuenta propietaria gestiona a todos; el resto solo a quienes creó.
+   * - Nadie puede cambiarse sus propios permisos ni desactivarse, y la propietaria no se toca.
+   */
+  function puedeGestionar(actor: FilaUsuario, objetivo: FilaUsuario): boolean {
+    if (objetivo.es_propietario || objetivo.id === actor.id) return false;
+    return actor.es_propietario || objetivo.creado_por === actor.id;
+  }
 
-  // ---------- Administración de usuarias ----------
-  app.get('/api/usuarias', { preHandler: requerirAdmin(pool) }, async () => {
+  function validarPermisosConcedidos(
+    actor: FilaUsuario,
+    pedidos: Partial<Record<Permiso, boolean | undefined>>,
+  ): Permiso | null {
+    const propios = permisosDe(actor);
+    for (const p of PERMISOS) if (pedidos[p] === true && !propios[p]) return p;
+    return null;
+  }
+
+  app.get('/api/usuarios', { preHandler: gestionUsuarios }, async (req) => {
+    const actor = req.sesion!.usuario;
     const { rows } = await pool.query(
-      `select id, email, nombre, rol, activo, totp_activo as mfa_activo,
-              google_sub is not null as google, apple_sub is not null as apple,
-              hash_contrasena is not null as con_contrasena, creado_en
-         from usuarios order by creado_en`,
+      `select u.id, u.email, u.nombre, u.activo, u.es_propietario, u.totp_activo as mfa_activo,
+              u.debe_cambiar_contrasena, u.creado_en, u.creado_por, c.email as creado_por_email,
+              ${PERMISOS.map((p) => `u.${p}`).join(', ')}
+         from usuarios u left join usuarios c on c.id = u.creado_por
+        order by u.es_propietario desc, u.creado_en`,
     );
-    return { usuarias: rows };
+    return {
+      usuarios: rows.map((r) => ({
+        ...r,
+        permisos: r.es_propietario
+          ? Object.fromEntries(PERMISOS.map((p) => [p, true]))
+          : Object.fromEntries(PERMISOS.map((p) => [p, r[p]])),
+        gestionable: puedeGestionar(actor, r),
+      })),
+    };
   });
 
-  app.post('/api/usuarias', { preHandler: requerirAdmin(pool) }, async (req, reply) => {
-    const datos = nuevaUsuariaEsquema.safeParse(req.body);
+  app.post('/api/usuarios', { preHandler: gestionUsuarios }, async (req, reply) => {
+    const actor = req.sesion!.usuario;
+    const datos = nuevoUsuarioEsquema.safeParse(req.body);
     if (!datos.success) return reply.code(400).send({ error: 'datos_invalidos' });
-    let hash: string | null = null;
-    if (datos.data.contrasena) {
-      const error = contrasenaValida(datos.data.contrasena);
-      if (error) return reply.code(400).send({ error: 'contrasena_debil', mensaje: error });
-      hash = await hashContrasena(datos.data.contrasena);
-    }
+    const pedidos = { ...PERMISOS_POR_DEFECTO, ...datos.data.permisos };
+    const negado = validarPermisosConcedidos(actor, pedidos);
+    if (negado) return reply.code(403).send({ error: 'permiso_no_concedible', permiso: negado });
+    const temporal = contrasenaTemporal();
     try {
       const { rows } = await pool.query(
-        `insert into usuarios (email, nombre, hash_contrasena, rol) values ($1,$2,$3,$4) returning id`,
-        [datos.data.email, datos.data.nombre, hash, datos.data.rol],
+        `insert into usuarios (email, nombre, hash_contrasena, debe_cambiar_contrasena, creado_por,
+           ${PERMISOS.join(', ')})
+         values ($1, $2, $3, true, $4, ${PERMISOS.map((_, i) => `$${i + 5}`).join(', ')})
+         returning id`,
+        [
+          datos.data.email,
+          datos.data.nombre,
+          await hashContrasena(temporal),
+          actor.id,
+          ...PERMISOS.map((p) => pedidos[p] === true),
+        ],
       );
-      return { id: rows[0].id };
+      return { id: rows[0].id, contrasena_temporal: temporal };
     } catch (e) {
       if ((e as { code?: string }).code === '23505')
         return reply.code(409).send({ error: 'email_existente' });
@@ -253,149 +318,54 @@ export async function rutasAuth(app: FastifyInstance, opts: { pool: Pool; cfg: C
   });
 
   app.patch<{ Params: { id: string } }>(
-    '/api/usuarias/:id',
-    { preHandler: requerirAdmin(pool) },
+    '/api/usuarios/:id',
+    { preHandler: gestionUsuarios },
     async (req, reply) => {
-      const datos = z
-        .object({
-          activo: z.boolean().optional(),
-          rol: z.enum(['admin', 'usuaria']).optional(),
-          contrasena: z.string().optional(),
-          quitar_mfa: z.boolean().optional(),
-        })
-        .safeParse(req.body);
+      const actor = req.sesion!.usuario;
+      const datos = cambioUsuarioEsquema.safeParse(req.body);
       if (!datos.success || !z.string().uuid().safeParse(req.params.id).success) {
         return reply.code(400).send({ error: 'datos_invalidos' });
       }
-      if (
-        req.params.id === req.sesion!.usuario.id &&
-        (datos.data.activo === false || datos.data.rol === 'usuaria')
-      ) {
-        return reply.code(400).send({ error: 'no_puede_degradarse_a_si_misma' });
+      const { rows } = await pool.query<FilaUsuario>('select * from usuarios where id = $1', [
+        req.params.id,
+      ]);
+      const objetivo = rows[0];
+      if (!objetivo) return reply.code(404).send({ error: 'no_encontrado' });
+      if (!puedeGestionar(actor, objetivo)) return reply.code(403).send({ error: 'sin_permiso' });
+
+      const { activo, nombre, permisos, restablecer_contrasena, quitar_mfa } = datos.data;
+      if (permisos) {
+        const negado = validarPermisosConcedidos(actor, permisos);
+        if (negado)
+          return reply.code(403).send({ error: 'permiso_no_concedible', permiso: negado });
       }
-      const { activo, rol, contrasena, quitar_mfa } = datos.data;
-      if (contrasena !== undefined) {
-        const error = contrasenaValida(contrasena);
-        if (error) return reply.code(400).send({ error: 'contrasena_debil', mensaje: error });
+      const temporal = restablecer_contrasena ? contrasenaTemporal() : null;
+      const valores: unknown[] = [req.params.id];
+      const sets: string[] = [];
+      const fijar = (columna: string, valor: unknown) => {
+        valores.push(valor);
+        sets.push(`${columna} = $${valores.length}`);
+      };
+      if (activo !== undefined) fijar('activo', activo);
+      if (nombre !== undefined) fijar('nombre', nombre);
+      if (permisos) for (const p of PERMISOS) if (permisos[p] !== undefined) fijar(p, permisos[p]);
+      if (temporal) {
+        fijar('hash_contrasena', await hashContrasena(temporal));
+        fijar('debe_cambiar_contrasena', true);
+        fijar('intentos_fallidos', 0);
+        fijar('bloqueado_hasta', null);
       }
-      const hash = contrasena ? await hashContrasena(contrasena) : null;
-      await pool.query(
-        `update usuarios set
-           activo = coalesce($2, activo),
-           rol = coalesce($3, rol),
-           hash_contrasena = coalesce($4, hash_contrasena),
-           totp_activo = case when $5 then false else totp_activo end,
-           totp_secreto = case when $5 then null else totp_secreto end,
-           intentos_fallidos = case when $4::text is not null then 0 else intentos_fallidos end,
-           bloqueado_hasta = case when $4::text is not null then null else bloqueado_hasta end
-         where id = $1`,
-        [req.params.id, activo ?? null, rol ?? null, hash, quitar_mfa === true],
-      );
-      if (activo === false || hash)
+      if (quitar_mfa) {
+        fijar('totp_activo', false);
+        fijar('totp_secreto', null);
+      }
+      if (sets.length) {
+        await pool.query(`update usuarios set ${sets.join(', ')} where id = $1`, valores);
+      }
+      if (activo === false || temporal) {
         await pool.query('delete from sesiones where usuario_id = $1', [req.params.id]);
-      return { ok: true };
+      }
+      return temporal ? { ok: true, contrasena_temporal: temporal } : { ok: true };
     },
   );
-
-  // ---------- OAuth ----------
-  const cookieTemporal = { path: '/api/auth', httpOnly: true, secure: seguro, maxAge: 600 };
-
-  async function iniciarSesionExterna(
-    reply: FastifyReply,
-    proveedor: 'google' | 'apple',
-    id: IdentidadExterna,
-  ) {
-    const columna = proveedor === 'google' ? 'google_sub' : 'apple_sub';
-    let { rows } = await pool.query<FilaUsuario>(`select * from usuarios where ${columna} = $1`, [
-      id.sub,
-    ]);
-    if (rows.length === 0 && id.email && id.emailVerificado) {
-      // Solo se vinculan cuentas cuyo correo ya fue dado de alta por administración
-      ({ rows } = await pool.query<FilaUsuario>(
-        `update usuarios set ${columna} = $2 where email = $1 and ${columna} is null returning *`,
-        [id.email, id.sub],
-      ));
-    }
-    const u = rows[0];
-    if (!u || !u.activo) return reply.redirect('/login?error=cuenta_no_autorizada');
-    await crearSesion(pool, reply, u.id, opcionesSesion(u.totp_activo));
-    return reply.redirect(u.totp_activo ? '/login?mfa=1' : '/');
-  }
-
-  app.get('/api/auth/google', async (_req, reply) => {
-    if (!cfg.google) return reply.code(404).send({ error: 'google_no_configurado' });
-    const estado = aleatorioUrl();
-    const nonce = aleatorioUrl();
-    const verificador = aleatorioUrl(48);
-    reply.setCookie('oauth_g', JSON.stringify({ estado, nonce, verificador }), {
-      ...cookieTemporal,
-      sameSite: 'lax',
-    });
-    return reply.redirect(urlAutorizacionGoogle(cfg, estado, nonce, verificador));
-  });
-
-  app.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
-    '/api/auth/google/callback',
-    async (req, reply) => {
-      if (!cfg.google) return reply.code(404).send();
-      const guardado = leerCookieJson(req.cookies.oauth_g);
-      reply.clearCookie('oauth_g', { path: '/api/auth' });
-      if (!guardado || !req.query.code || req.query.state !== guardado.estado) {
-        return reply.redirect('/login?error=oauth_estado');
-      }
-      try {
-        const id = await canjearCodigoGoogle(
-          cfg,
-          req.query.code,
-          guardado.verificador,
-          guardado.nonce,
-        );
-        return await iniciarSesionExterna(reply, 'google', id);
-      } catch (e) {
-        req.log.warn({ err: e }, 'fallo login google');
-        return reply.redirect('/login?error=oauth_google');
-      }
-    },
-  );
-
-  app.get('/api/auth/apple', async (_req, reply) => {
-    if (!cfg.apple) return reply.code(404).send({ error: 'apple_no_configurado' });
-    const estado = aleatorioUrl();
-    const nonce = aleatorioUrl();
-    // Apple responde con un POST entre sitios: la cookie necesita SameSite=None (y Secure)
-    reply.setCookie('oauth_a', JSON.stringify({ estado, nonce }), {
-      ...cookieTemporal,
-      sameSite: seguro ? 'none' : 'lax',
-    });
-    return reply.redirect(urlAutorizacionApple(cfg, estado, nonce));
-  });
-
-  app.post<{ Body: { code?: string; state?: string } }>(
-    '/api/auth/apple/callback',
-    async (req, reply) => {
-      if (!cfg.apple) return reply.code(404).send();
-      const guardado = leerCookieJson(req.cookies.oauth_a);
-      reply.clearCookie('oauth_a', { path: '/api/auth' });
-      if (!guardado || !req.body?.code || req.body.state !== guardado.estado) {
-        return reply.redirect('/login?error=oauth_estado', 303);
-      }
-      try {
-        const id = await canjearCodigoApple(cfg, req.body.code, guardado.nonce);
-        reply.code(303);
-        return await iniciarSesionExterna(reply, 'apple', id);
-      } catch (e) {
-        req.log.warn({ err: e }, 'fallo login apple');
-        return reply.redirect('/login?error=oauth_apple', 303);
-      }
-    },
-  );
-}
-
-function leerCookieJson(valor: string | undefined): Record<string, string> | null {
-  if (!valor) return null;
-  try {
-    return JSON.parse(valor);
-  } catch {
-    return null;
-  }
 }

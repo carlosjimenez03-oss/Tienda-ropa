@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { alExpirarSesion, api, ErrorApi, SinConexion } from '../api';
 import { db, guardarMeta, leerMeta } from '../db/local';
 import type { UsuarioPublico } from '../../shared/esquemas';
+import { PERMISOS, type Permisos } from '../../shared/permisos';
 
 type Estado =
   | { tipo: 'cargando' }
@@ -64,6 +65,17 @@ export function ProveedorSesion({ children }: { children: ReactNode }) {
   }, []);
 
   return <Ctx.Provider value={{ estado, entrar, salir, refrescar }}>{children}</Ctx.Provider>;
+}
+
+/** Permisos de la persona conectada (todos falsos si no hay sesión). */
+export function usePermisos(): Permisos {
+  const { estado } = useSesion();
+  if (estado.tipo !== 'autenticado' && estado.tipo !== 'expirada') {
+    return Object.fromEntries(PERMISOS.map((p) => [p, false])) as Permisos;
+  }
+  return (
+    estado.usuario.permisos ?? (Object.fromEntries(PERMISOS.map((p) => [p, false])) as Permisos)
+  );
 }
 
 export function useSesion(): ContextoSesion {

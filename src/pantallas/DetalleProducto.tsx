@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/local';
 import {
@@ -12,12 +12,16 @@ import { formatoFecha, formatoPrecio } from '../dominio/consultas';
 import { stockPorLote } from '../../shared/stock';
 import { programarSync } from '../sync/engine';
 import { ImagenProducto } from '../componentes/ImagenProducto';
+import { usePermisos } from '../auth/sesion';
 import { CampoImagen } from '../componentes/CampoImagen';
 import { aDatos, CamposProducto, type ValoresForm } from '../componentes/FormProducto';
 
 export function DetalleProducto() {
   const { id = '' } = useParams();
   const navegar = useNavigate();
+  const permisos = usePermisos();
+  const puedeEntrada = permisos.puede_agregar_mercancia || permisos.puede_editar_productos;
+  const recienCreado = (useLocation().state as { creado?: boolean } | null)?.creado === true;
   const datos = useLiveQuery(async () => {
     const producto = await db.productos.get(id);
     if (!producto) return null;
@@ -43,7 +47,7 @@ export function DetalleProducto() {
     return (
       <div className="tarjeta">
         Producto no encontrado.{' '}
-        <Link to="/" className="text-marca-700 underline">
+        <Link to="/productos" className="text-marca-700 underline">
           Volver
         </Link>
       </div>
@@ -73,9 +77,17 @@ export function DetalleProducto() {
 
   return (
     <div className="space-y-4">
-      <Link to="/" className="text-sm text-marca-700">
+      <Link to="/productos" className="text-sm text-marca-700">
         ← Productos
       </Link>
+      {recienCreado && (
+        <div
+          className="rounded-2xl bg-emerald-100 p-4 text-lg font-semibold text-emerald-900"
+          role="status"
+        >
+          ✅ Producto guardado
+        </div>
+      )}
       <div className="tarjeta flex flex-col gap-4 sm:flex-row">
         <ImagenProducto
           id={imagenes[0]?.id}
@@ -118,26 +130,31 @@ export function DetalleProducto() {
                 <strong>{total}</strong> en stock
               </p>
               <div className="mt-3 flex flex-wrap gap-2">
-                <Link
-                  to={`/movimientos?producto=${producto.id}&tipo=salida`}
-                  className="boton-primario"
-                >
-                  Registrar venta
-                </Link>
-                <button
-                  className="boton-secundario"
-                  onClick={() =>
-                    setEditando({
-                      nombre: producto.nombre,
-                      sku: producto.sku ?? '',
-                      talla: producto.talla ?? '',
-                      color: producto.color ?? '',
-                      precio: producto.precio?.toString() ?? '',
-                    })
-                  }
-                >
-                  Editar
-                </button>
+                {permisos.puede_vender && (
+                  <Link
+                    to={`/movimientos?producto=${producto.id}&tipo=salida`}
+                    className="boton-primario"
+                  >
+                    Registrar venta
+                  </Link>
+                )}
+                {permisos.puede_editar_productos && (
+                  <button
+                    className="boton-secundario"
+                    onClick={() =>
+                      setEditando({
+                        nombre: producto.nombre,
+                        sku: producto.sku ?? '',
+                        talla: producto.talla ?? '',
+                        color: producto.color ?? '',
+                        precio: producto.precio?.toString() ?? '',
+                        stock_minimo: String(producto.stock_minimo ?? 2),
+                      })
+                    }
+                  >
+                    Editar
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -162,44 +179,50 @@ export function DetalleProducto() {
                 {formatoFecha.format(new Date(l.creado_en))}
               </span>
               <span className="ml-auto font-semibold">{stock.get(l.id) ?? 0} u.</span>
-              <Link
-                to={`/movimientos?lote=${l.id}&tipo=entrada`}
-                className="rounded-lg border px-3 py-1 text-sm"
-              >
-                Entrada
-              </Link>
-              <Link
-                to={`/movimientos?lote=${l.id}&tipo=salida`}
-                className="rounded-lg bg-marca-700 px-3 py-1 text-sm text-white"
-              >
-                Venta
-              </Link>
+              {permisos.puede_agregar_mercancia && (
+                <Link
+                  to={`/movimientos?lote=${l.id}&tipo=entrada`}
+                  className="rounded-lg border px-3 py-1 text-sm"
+                >
+                  Entrada
+                </Link>
+              )}
+              {permisos.puede_vender && (
+                <Link
+                  to={`/movimientos?lote=${l.id}&tipo=salida`}
+                  className="rounded-lg bg-marca-700 px-3 py-1 text-sm text-white"
+                >
+                  Venta
+                </Link>
+              )}
             </li>
           ))}
         </ul>
-        <form
-          className="mt-3 flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            ejecutar(async () => {
-              await crearLote(producto.id, Number(cantidadLote || 0));
-              setCantidadLote('');
-            });
-          }}
-        >
-          <input
-            className="campo"
-            type="number"
-            min={0}
-            step={1}
-            inputMode="numeric"
-            placeholder="Cantidad del nuevo lote"
-            value={cantidadLote}
-            onChange={(e) => setCantidadLote(e.target.value)}
-            aria-label="Cantidad del nuevo lote"
-          />
-          <button className="boton-secundario shrink-0">+ Nuevo lote</button>
-        </form>
+        {puedeEntrada && (
+          <form
+            className="mt-3 flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              ejecutar(async () => {
+                await crearLote(producto.id, Number(cantidadLote || 0));
+                setCantidadLote('');
+              });
+            }}
+          >
+            <input
+              className="campo"
+              type="number"
+              min={0}
+              step={1}
+              inputMode="numeric"
+              placeholder="Cantidad del nuevo lote"
+              value={cantidadLote}
+              onChange={(e) => setCantidadLote(e.target.value)}
+              aria-label="Cantidad del nuevo lote"
+            />
+            <button className="boton-secundario shrink-0">+ Nuevo lote</button>
+          </form>
+        )}
       </section>
 
       <section className="tarjeta space-y-3">
@@ -211,7 +234,7 @@ export function DetalleProducto() {
             ))}
           </div>
         )}
-        <CampoImagen onCambio={setNuevaImagen} />
+        {permisos.puede_editar_productos && <CampoImagen onCambio={setNuevaImagen} />}
         {nuevaImagen && (
           <button
             className="boton-secundario"
@@ -258,19 +281,21 @@ export function DetalleProducto() {
         )}
       </section>
 
-      <button
-        className="text-sm text-red-700 underline"
-        onClick={() => {
-          if (confirm(`¿Eliminar "${producto.nombre}"? Los movimientos se conservan.`)) {
-            ejecutar(async () => {
-              await eliminarProducto(producto.id);
-              navegar('/', { replace: true });
-            });
-          }
-        }}
-      >
-        Eliminar producto
-      </button>
+      {permisos.puede_editar_productos && (
+        <button
+          className="text-sm text-red-700 underline"
+          onClick={() => {
+            if (confirm(`¿Eliminar "${producto.nombre}"? Los movimientos se conservan.`)) {
+              ejecutar(async () => {
+                await eliminarProducto(producto.id);
+                navegar('/productos', { replace: true });
+              });
+            }
+          }}
+        >
+          Eliminar producto
+        </button>
+      )}
     </div>
   );
 }

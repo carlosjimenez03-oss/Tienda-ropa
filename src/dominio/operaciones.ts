@@ -3,7 +3,12 @@ import { encolar } from '../db/outbox';
 import { generarCodigoLote } from '../../shared/lote';
 import { calcularStock } from '../../shared/stock';
 import type { Lote, Movimiento, Producto } from '../../shared/esquemas';
-import { validarMovimiento, validarProducto, type DatosProducto } from './validaciones';
+import {
+  validarMovimiento,
+  validarPrecio,
+  validarProducto,
+  type DatosProducto,
+} from './validaciones';
 
 export function uuid(): string {
   return crypto.randomUUID();
@@ -14,9 +19,14 @@ export async function stockDeLote(loteId: string): Promise<number> {
 }
 
 export async function crearProducto(
-  datos: DatosProducto & { cantidadInicial: number; imagen?: Blob | null },
+  datos: DatosProducto & {
+    cantidadInicial: number;
+    costoUnitario?: number | null;
+    imagen?: Blob | null;
+  },
 ): Promise<{ producto: Producto; lote: Lote }> {
   const limpio = validarProducto(datos);
+  const costo = validarPrecio(datos.costoUnitario, 'El costo');
   if (!Number.isInteger(datos.cantidadInicial) || datos.cantidadInicial < 0) {
     throw new Error('La cantidad inicial debe ser un número entero de 0 o más');
   }
@@ -50,6 +60,7 @@ export async function crearProducto(
           tipo: 'entrada',
           cantidad: datos.cantidadInicial,
           nota: 'Inventario inicial',
+          precio_unitario: costo,
           ocurrido_en: ahora,
           eliminado: false,
         };
@@ -141,34 +152,67 @@ export async function crearLote(
   return lote;
 }
 
+export async function stockDeProducto(productoId: string): Promise<number> {
+  const lotes = await db.lotes.where('producto_id').equals(productoId).primaryKeys();
+  return calcularStock(await db.movimientos.where('lote_id').anyOf(lotes).toArray());
+}
+
+export interface ResultadoMovimiento {
+  movimiento: Movimiento;
+  producto: Producto;
+  /** Unidades que quedan del producto (todos sus lotes) tras el movimiento. */
+  stockProducto: number;
+  /** true si esta venta dejó el producto en su mínimo o por debajo. */
+  alertaStockBajo: boolean;
+}
+
 export async function registrarMovimiento(datos: {
   loteId: string;
   tipo: 'entrada' | 'salida';
   cantidad: number;
   nota?: string;
-}): Promise<Movimiento> {
+  /** Precio de venta (salida) o costo de compra (entrada) por unidad. En ventas, por defecto el del producto. */
+  precioUnitario?: number | null;
+}): Promise<ResultadoMovimiento> {
   validarMovimiento(datos);
-  const m: Movimiento = {
-    id: uuid(),
-    lote_id: datos.loteId,
-    tipo: datos.tipo,
-    cantidad: datos.cantidad,
-    nota: datos.nota?.trim() || null,
-    ocurrido_en: new Date().toISOString(),
-    eliminado: false,
-  };
-  await db.transaction('rw', [db.lotes, db.movimientos, db.outbox], async () => {
-    if (!(await db.lotes.get(datos.loteId))) throw new Error('El lote no existe');
+  const precio = validarPrecio(
+    datos.precioUnitario,
+    datos.tipo === 'salida' ? 'El precio' : 'El costo',
+  );
+  return db.transaction('rw', [db.productos, db.lotes, db.movimientos, db.outbox], async () => {
+    const lote = await db.lotes.get(datos.loteId);
+    if (!lote) throw new Error('El lote no existe');
+    const producto = await db.productos.get(lote.producto_id);
+    if (!producto) throw new Error('El producto no existe');
     if (datos.tipo === 'salida') {
       const stock = await stockDeLote(datos.loteId);
       if (datos.cantidad > stock) {
-        throw new Error(`No hay suficiente stock: quedan ${stock}`);
+        throw new Error(
+          stock === 0 ? 'No quedan unidades de este producto' : `Solo quedan ${stock} unidades`,
+        );
       }
     }
+    const antes = await stockDeProducto(producto.id);
+    const m: Movimiento = {
+      id: uuid(),
+      lote_id: datos.loteId,
+      tipo: datos.tipo,
+      cantidad: datos.cantidad,
+      nota: datos.nota?.trim() || null,
+      precio_unitario: precio ?? (datos.tipo === 'salida' ? (producto.precio ?? null) : null),
+      ocurrido_en: new Date().toISOString(),
+      eliminado: false,
+    };
     await db.movimientos.add(m);
     await encolar('insertar', 'movimientos', m);
+    const despues = antes + (datos.tipo === 'entrada' ? datos.cantidad : -datos.cantidad);
+    return {
+      movimiento: m,
+      producto,
+      stockProducto: despues,
+      alertaStockBajo: datos.tipo === 'salida' && despues <= (producto.stock_minimo ?? 2),
+    };
   });
-  return m;
 }
 
 export async function anularMovimiento(id: string): Promise<void> {

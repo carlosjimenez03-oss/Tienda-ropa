@@ -1,7 +1,7 @@
 # Plan: Sistema de inventario PWA para tienda de ropa y accesorios
 
-Objetivo: PWA instalable en PC, Android, iPhone y tablet, con login (Google, Sign in with Apple y
-usuario/contraseña), alta de productos con lote automático e imagen, registro de entradas y salidas
+Objetivo: PWA instalable en PC, Android, iPhone y tablet, con login (usuario/contraseña y
+permisos por persona), alta de productos con lote automático e imagen, registro de entradas y salidas
 (ventas), funcionamiento sin internet y sincronización automática al recuperar la conexión.
 
 **Cambio respecto al plan original:** el despliegue es en Dokploy como un solo paquete con la base
@@ -16,7 +16,6 @@ Leyenda: `[x]` hecho y probado · `[ ]` requiere una acción humana (cuentas, di
 - Una tienda, 1–3 usuarias simultáneas; hasta unos miles de productos.
 - Español (República Dominicana), zona horaria `America/Santo_Domingo`, moneda mostrada en RD$.
 - Dominio propio con HTTPS (Dokploy + Let's Encrypt).
-- Sign in with Apple requiere cuenta de Apple Developer (opcional: la app funciona sin ella).
 - Impuestos y facturación electrónica: fuera de alcance.
 
 ## Fase 1 · Fundamentos
@@ -38,12 +37,13 @@ Leyenda: `[x]` hecho y probado · `[ ]` requiere una acción humana (cuentas, di
 ## Fase 3 · Autenticación
 
 - [x] Correo y contraseña (bcrypt). Alta por administración (sin registro público ni SMTP).
-- [x] Google (OAuth code + PKCE + verificación del id_token).
-- [x] Sign in with Apple (form_post, client secret ES256, verificación del id_token).
-- [ ] Configurar credenciales reales de Google y Apple — ver README §2.
+- [x] ~~Google y Sign in with Apple~~ — retirados a petición del cliente (ADR-009).
 - [x] MFA TOTP opcional.
 - [x] Límite de intentos (10/min por IP) y bloqueo de cuenta (5 fallos → 15 min).
 - [x] Sesión expirada conserva los datos pendientes; cerrar sesión pide confirmación si los hay.
+
+- [x] Permisos por persona; quien crea usuarios solo concede los permisos que tiene.
+- [x] Contraseña temporal generada y cambio obligatorio en el primer ingreso.
 
 ## Fase 4 · Base local y dominio
 
@@ -54,6 +54,9 @@ Leyenda: `[x]` hecho y probado · `[ ]` requiere una acción humana (cuentas, di
 - [x] Alta de producto (nombre, talla, color, precio, SKU, cantidad inicial, foto) → producto + lote.
 - [x] Movimientos: entrada o venta por lote; no permite vender más que el stock; anulación lógica.
 - [x] Lista de productos con búsqueda por nombre/talla/color/código de lote y stock.
+
+- [x] Aviso de productos por acabarse (umbral por producto, Inicio, lista, notificación opcional).
+- [x] Resumen: vendido, comprado, inventario, ventas por día, lo más vendido.
 
 ## Fase 5 · Imágenes
 
@@ -95,7 +98,6 @@ Leyenda: `[x]` hecho y probado · `[ ]` requiere una acción humana (cuentas, di
 | Riesgo                            | Mitigación                                                                |
 | --------------------------------- | ------------------------------------------------------------------------- |
 | Safari purga datos de PWA sin uso | Instalar la app, `storage.persist()`, aviso a los 5 días                  |
-| Apple requiere cuenta paga        | Login con contraseña/Google funciona sin Apple                            |
 | Errores de sincronización         | Movimientos append-only, upsert idempotente, cursor de versión, tests E2E |
 | Fotos pesadas                     | WebP ≤ 1000 px, límite de 3 MB en el servidor                             |
 | Lotes duplicados                  | `UNIQUE` + regeneración en el servidor                                    |

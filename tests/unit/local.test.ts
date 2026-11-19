@@ -45,7 +45,7 @@ describe('operaciones offline', () => {
     await registrarMovimiento({ loteId: lote.id, tipo: 'salida', cantidad: 2 });
     await expect(
       registrarMovimiento({ loteId: lote.id, tipo: 'salida', cantidad: 1 }),
-    ).rejects.toThrow(/stock/);
+    ).rejects.toThrow(/quedan/);
     expect(await stockDeLote(lote.id)).toBe(0);
   });
 
@@ -60,7 +60,11 @@ describe('operaciones offline', () => {
 
   it('anular una venta devuelve el stock', async () => {
     const { lote } = await crearProducto({ nombre: 'Gorra', cantidadInicial: 3 });
-    const venta = await registrarMovimiento({ loteId: lote.id, tipo: 'salida', cantidad: 2 });
+    const { movimiento: venta } = await registrarMovimiento({
+      loteId: lote.id,
+      tipo: 'salida',
+      cantidad: 2,
+    });
     await anularMovimiento(venta.id);
     expect(await stockDeLote(lote.id)).toBe(3);
     const ultimo = await db.outbox.orderBy('id').last();
@@ -120,7 +124,11 @@ describe('sincronización', () => {
 
   it('pull no deshace una anulación local pendiente', async () => {
     const { lote } = await crearProducto({ nombre: 'Aretes', cantidadInicial: 5 });
-    const venta = await registrarMovimiento({ loteId: lote.id, tipo: 'salida', cantidad: 1 });
+    const { movimiento: venta } = await registrarMovimiento({
+      loteId: lote.id,
+      tipo: 'salida',
+      cantidad: 1,
+    });
     await anularMovimiento(venta.id);
     await aplicarPull({
       productos: [],
@@ -233,4 +241,97 @@ describe('rendimiento', () => {
     expect(t1 - t0).toBeLessThan(5000);
     expect(t2 - t1).toBeLessThan(50);
   }, 60_000);
+});
+
+describe('resumen del panel', () => {
+  it('suma ventas y compras del periodo en la zona de Santo Domingo', async () => {
+    const { calcularResumen, diasDelPeriodo, diaLocal } = await import('../../src/dominio/resumen');
+    const ahora = new Date('2026-06-15T15:00:00Z'); // 11:00 en Santo Domingo
+    const p = {
+      id: 'p',
+      nombre: 'Blusa',
+      precio: 100,
+      stock_minimo: 2,
+      creado_en: '',
+      actualizado_en: '',
+      eliminado: false,
+    };
+    const l = { id: 'l', codigo: '20260601-ABCD', producto_id: 'p', creado_en: '' };
+    const mov = (
+      tipo: 'entrada' | 'salida',
+      cantidad: number,
+      ocurrido_en: string,
+      precio_unitario: number | null,
+      eliminado = false,
+    ) => ({
+      id: crypto.randomUUID(),
+      lote_id: 'l',
+      tipo,
+      cantidad,
+      ocurrido_en,
+      precio_unitario,
+      eliminado,
+    });
+    const movimientos = [
+      mov('entrada', 10, '2026-06-15T12:00:00Z', 40),
+      mov('entrada', 5, '2026-06-15T12:00:00Z', null),
+      mov('salida', 2, '2026-06-15T14:00:00Z', 100),
+      mov('salida', 1, '2026-06-15T14:00:00Z', 90, true), // anulada
+      mov('salida', 3, '2026-06-15T02:00:00Z', 100), // 14 de junio 22:00 local: no es "hoy"
+      mov('salida', 1, '2026-05-30T12:00:00Z', 100), // fuera del mes
+    ];
+    const hoy = calcularResumen({ productos: [p], lotes: [l], movimientos }, 'hoy', ahora);
+    expect(hoy.vendido).toEqual({ unidades: 2, monto: 200, ventas: 1 });
+    expect(hoy.comprado).toEqual({ unidades: 15, monto: 400, sinCosto: 1 });
+    const mes = calcularResumen({ productos: [p], lotes: [l], movimientos }, 'mes', ahora);
+    expect(mes.vendido.unidades).toBe(5);
+    expect(mes.porDia).toHaveLength(15);
+    expect(mes.porDia.find((d) => d.dia === '2026-06-14')!.unidades).toBe(3);
+    expect(mes.masVendidos[0]).toMatchObject({ unidades: 5, monto: 500 });
+    expect(diasDelPeriodo('7d', ahora)).toEqual([
+      '2026-06-09',
+      '2026-06-10',
+      '2026-06-11',
+      '2026-06-12',
+      '2026-06-13',
+      '2026-06-14',
+      '2026-06-15',
+    ]);
+    expect(diaLocal('2026-06-15T02:00:00Z')).toBe('2026-06-14');
+  });
+
+  it('avisa cuando una venta deja el producto en su mínimo', async () => {
+    const { producto, lote } = await crearProducto({
+      nombre: 'Pañuelo',
+      cantidadInicial: 4,
+      stock_minimo: 2,
+      precio: 50,
+    });
+    const r1 = await registrarMovimiento({ loteId: lote.id, tipo: 'salida', cantidad: 1 });
+    expect(r1).toMatchObject({ stockProducto: 3, alertaStockBajo: false });
+    expect(r1.movimiento.precio_unitario).toBe(50);
+    const r2 = await registrarMovimiento({
+      loteId: lote.id,
+      tipo: 'salida',
+      cantidad: 1,
+      precioUnitario: 40,
+    });
+    expect(r2).toMatchObject({ stockProducto: 2, alertaStockBajo: true });
+    expect(r2.movimiento.precio_unitario).toBe(40);
+    const filas = await cargarProductos();
+    expect(filas.find((f) => f.producto.id === producto.id)!.estado).toBe('por_acabarse');
+  });
+});
+
+describe('lectura de precios escritos', () => {
+  it('entiende el formato dominicano', async () => {
+    const { aNumero } = await import('../../src/componentes/FormProducto');
+    expect(aNumero('1,000', 'x')).toBe(1000);
+    expect(aNumero('RD$ 1,250.50', 'x')).toBe(1250.5);
+    expect(aNumero('1200', 'x')).toBe(1200);
+    expect(aNumero('12,5', 'x')).toBe(12.5);
+    expect(aNumero('1,000,000', 'x')).toBe(1000000);
+    expect(aNumero('', 'x')).toBeNull();
+    expect(() => aNumero('abc', 'Precio')).toThrow(/números/);
+  });
 });

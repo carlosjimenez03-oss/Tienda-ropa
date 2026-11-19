@@ -41,17 +41,17 @@ export function BarraEstado() {
   if (!enLinea) {
     texto =
       pendientes > 0
-        ? `Sin conexión · ${pendientes} cambios pendientes`
-        : 'Sin conexión · trabajando en local';
+        ? `Sin internet · ${pendientes} cambios guardados en este equipo`
+        : 'Sin internet · puedes seguir trabajando';
     color = 'bg-amber-50 text-amber-900 border-amber-200';
   } else if (sincronizando) {
-    texto = 'Sincronizando…';
+    texto = 'Enviando cambios…';
     color = 'bg-sky-50 text-sky-800 border-sky-200';
   } else if (pendientes > 0) {
-    texto = `${pendientes} cambios pendientes`;
+    texto = `${pendientes} cambios por enviar`;
     color = 'bg-amber-50 text-amber-900 border-amber-200';
   } else {
-    texto = `Sincronizado ${haceTiempo(ultimo)}`;
+    texto = `Todo al día · sincronizado ${haceTiempo(ultimo)}`;
   }
 
   return (

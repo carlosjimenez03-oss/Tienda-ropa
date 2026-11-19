@@ -10,20 +10,20 @@ más de 10 contenedores (Kong, GoTrue, PostgREST, Realtime, Storage, Studio…),
 una tienda con 1–3 usuarias.
 
 **Decisión.** Un servidor Node/Fastify propio + PostgreSQL 16 en el mismo `docker-compose.yml`.
-El servidor sirve la API, el login (contraseña, Google, Apple, TOTP), las fotos (volumen en disco)
+El servidor sirve la API, el login (contraseña y TOTP), las fotos (volumen en disco)
 y la PWA compilada.
 
 **Consecuencias.** 3 contenedores (app, db, backup). La autorización vive en la API: la base no
 se expone fuera de la red interna. La RLS se activa igualmente en todas las tablas como defensa en
 profundidad (un rol distinto del dueño no ve nada sin políticas). Las equivalencias con el plan:
 
-| Plan (Supabase)             | Implementación                                                                            |
-| --------------------------- | ----------------------------------------------------------------------------------------- |
-| Supabase Auth               | `server/auth/*`: bcrypt, sesiones en Postgres (cookie httpOnly), OAuth Google/Apple, TOTP |
-| RLS por usuario autenticado | Middleware `requerirSesion` en todas las rutas de datos + RLS activado                    |
-| Storage bucket privado      | Volumen `uploads`, servido solo a sesiones válidas                                        |
-| `auth.users`                | Tabla `usuarios`                                                                          |
-| `get_advisors`              | Tests de API (acceso sin sesión, CSRF, append-only) + revisión de seguridad en CI         |
+| Plan (Supabase)             | Implementación                                                                    |
+| --------------------------- | --------------------------------------------------------------------------------- |
+| Supabase Auth               | `server/auth/*`: bcrypt, sesiones en Postgres (cookie httpOnly), TOTP             |
+| RLS por usuario autenticado | Middleware `requerirSesion` en todas las rutas de datos + RLS activado            |
+| Storage bucket privado      | Volumen `uploads`, servido solo a sesiones válidas                                |
+| `auth.users`                | Tabla `usuarios`                                                                  |
+| `get_advisors`              | Tests de API (acceso sin sesión, CSRF, append-only) + revisión de seguridad en CI |
 
 ## ADR-002 · Lenguaje y herramientas
 
@@ -64,10 +64,21 @@ Cookie `httpOnly`, `SameSite=Lax`, `Secure` con HTTPS; 90 días deslizantes (una
 días sin conexión). Se guarda solo el SHA-256 del token. Protección CSRF con cabecera obligatoria
 `x-inventario: 1` en toda petición que modifica datos.
 
-## ADR-009 · Alta de usuarias solo por administración
+## ADR-009 · Usuarios con permisos, sin registro público ni login social
 
-No hay registro público ni confirmación por correo (no hay SMTP que mantener). Google/Apple solo
-entran si el correo verificado coincide con una cuenta dada de alta.
+Se retiró el inicio de sesión con Google y Apple a petición del cliente: solo correo y contraseña.
+En lugar de roles hay cinco permisos por persona (vender, agregar mercancía, editar productos,
+ver resumen, crear usuarios). Quien crea usuarios solo puede conceder los permisos que tiene; la
+cuenta propietaria (única, creada desde `ADMIN_EMAIL`) tiene todos y no se puede modificar. Las
+contraseñas que asigna otra persona son temporales y la app obliga a cambiarlas al entrar; mientras
+tanto la API rechaza cualquier otra petición. Los permisos se comprueban en el servidor en cada
+cambio sincronizado (una escritura sin permiso se marca como error permanente).
+
+## ADR-010 · Alertas de stock y precio en cada movimiento
+
+Cada producto guarda `stock_minimo`. Cada movimiento guarda `precio_unitario` (precio de venta en
+salidas, costo en entradas), para que el resumen refleje lo realmente cobrado aunque el precio del
+producto cambie después.
 
 ## Fuera de alcance (v1)
 

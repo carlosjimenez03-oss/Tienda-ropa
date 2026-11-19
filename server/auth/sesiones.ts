@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from '../db.js';
 import type { UsuarioPublico } from '../../shared/esquemas.js';
+import { extraerPermisos, TODOS_LOS_PERMISOS } from '../../shared/permisos.js';
 
 export const COOKIE_SESION = 'sid';
 
@@ -9,7 +10,14 @@ export interface FilaUsuario {
   id: string;
   email: string;
   nombre: string;
-  rol: 'admin' | 'usuaria';
+  es_propietario: boolean;
+  creado_por: string | null;
+  debe_cambiar_contrasena: boolean;
+  puede_vender: boolean;
+  puede_agregar_mercancia: boolean;
+  puede_editar_productos: boolean;
+  puede_ver_resumen: boolean;
+  puede_crear_usuarios: boolean;
   activo: boolean;
   hash_contrasena: string | null;
   totp_secreto: string | null;
@@ -19,7 +27,15 @@ export interface FilaUsuario {
 }
 
 export function usuarioPublico(u: FilaUsuario): UsuarioPublico {
-  return { id: u.id, email: u.email, nombre: u.nombre, rol: u.rol, mfa_activo: u.totp_activo };
+  return {
+    id: u.id,
+    email: u.email,
+    nombre: u.nombre,
+    es_propietario: u.es_propietario,
+    debe_cambiar_contrasena: u.debe_cambiar_contrasena,
+    mfa_activo: u.totp_activo,
+    permisos: u.es_propietario ? { ...TODOS_LOS_PERMISOS } : extraerPermisos(u),
+  };
 }
 
 export function hashToken(token: string): string {

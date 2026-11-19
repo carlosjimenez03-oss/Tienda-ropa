@@ -58,8 +58,8 @@ d('API (integración con Postgres)', () => {
     expect(push.statusCode).toBe(401);
     const img = await app.inject({ method: 'GET', url: `/api/imagenes/${randomUUID()}` });
     expect(img.statusCode).toBe(401);
-    const usuarias = await app.inject({ method: 'GET', url: '/api/usuarias' });
-    expect(usuarias.statusCode).toBe(401);
+    const usuarios = await app.inject({ method: 'GET', url: '/api/usuarios' });
+    expect(usuarios.statusCode).toBe(401);
   });
 
   it('rechaza mutaciones sin la cabecera anti-CSRF', async () => {
@@ -93,7 +93,39 @@ d('API (integración con Postgres)', () => {
     expect(c.httpOnly).toBe(true);
     cookie = `sid=${c.value}`;
     const yo = await app.inject({ method: 'GET', url: '/api/auth/yo', headers: H() });
-    expect(yo.json().usuario.email).toBe(admin.email);
+    expect(yo.json().usuario).toMatchObject({
+      email: admin.email,
+      es_propietario: true,
+      debe_cambiar_contrasena: true,
+    });
+  });
+
+  it('obliga a cambiar la contraseña inicial antes de usar la app', async () => {
+    const bloqueado = await app.inject({
+      method: 'GET',
+      url: '/api/sync/pull?desde=0',
+      headers: H(),
+    });
+    expect(bloqueado.statusCode).toBe(403);
+    expect(bloqueado.json().error).toBe('debe_cambiar_contrasena');
+    const igual = await app.inject({
+      method: 'POST',
+      url: '/api/auth/contrasena',
+      headers: H(),
+      payload: { actual: admin.contrasena, nueva: admin.contrasena },
+    });
+    expect(igual.statusCode).toBe(400);
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/auth/contrasena',
+      headers: H(),
+      payload: { actual: admin.contrasena, nueva: 'mi-nueva-contrasena-1' },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().usuario.debe_cambiar_contrasena).toBe(false);
+    admin.contrasena = 'mi-nueva-contrasena-1';
+    const ok = await app.inject({ method: 'GET', url: '/api/sync/pull?desde=0', headers: H() });
+    expect(ok.statusCode).toBe(200);
   });
 
   it('sincroniza producto, lote y movimientos de forma idempotente', async () => {
@@ -383,27 +415,146 @@ d('API (integración con Postgres)', () => {
     expect(malo.statusCode).toBe(415);
   });
 
-  it('la administración crea usuarias y una usuaria normal no puede', async () => {
-    const r = await app.inject({
-      method: 'POST',
-      url: '/api/usuarias',
-      headers: H(),
-      payload: { email: 'Vendedora@Tienda.test', nombre: 'Ana', contrasena: 'otra-contrasena-1' },
-    });
-    expect(r.statusCode).toBe(200);
+  async function entrarComo(email: string, contrasena: string, nueva?: string) {
     const login = await app.inject({
       method: 'POST',
       url: '/api/auth/entrar',
       headers: { 'x-inventario': '1' },
-      payload: { email: 'vendedora@tienda.test', contrasena: 'otra-contrasena-1' },
+      payload: { email, contrasena },
     });
-    const c = login.cookies.find((k) => k.name === 'sid')!;
-    const lista = await app.inject({
-      method: 'GET',
-      url: '/api/usuarias',
-      headers: { cookie: `sid=${c.value}` },
+    expect(login.statusCode).toBe(200);
+    const h = {
+      cookie: `sid=${login.cookies.find((k) => k.name === 'sid')!.value}`,
+      'x-inventario': '1',
+    };
+    if (nueva) {
+      const r = await app.inject({
+        method: 'POST',
+        url: '/api/auth/contrasena',
+        headers: h,
+        payload: { actual: contrasena, nueva },
+      });
+      expect(r.statusCode).toBe(200);
+    }
+    return h;
+  }
+
+  it('crea usuarios con contraseña temporal y permisos, sin permitir escalar permisos', async () => {
+    // La propietaria crea a una encargada que puede crear usuarios, pero no ver el resumen
+    const r = await app.inject({
+      method: 'POST',
+      url: '/api/usuarios',
+      headers: H(),
+      payload: {
+        email: 'Encargada@Tienda.test',
+        nombre: 'Ana',
+        permisos: {
+          puede_crear_usuarios: true,
+          puede_ver_resumen: false,
+          puede_editar_productos: true,
+        },
+      },
     });
+    expect(r.statusCode).toBe(200);
+    const temporal = r.json().contrasena_temporal as string;
+    expect(temporal).toMatch(/^[a-z2-9]{4}-[a-z2-9]{4}-[a-z2-9]{4}$/);
+    const hEnc = await entrarComo('encargada@tienda.test', temporal, 'encargada-segura-1');
+
+    // La encargada no puede dar "ver resumen" porque ella no lo tiene
+    const escalar = await app.inject({
+      method: 'POST',
+      url: '/api/usuarios',
+      headers: hEnc,
+      payload: { email: 'cajera@tienda.test', permisos: { puede_ver_resumen: true } },
+    });
+    expect(escalar.statusCode).toBe(403);
+    expect(escalar.json().permiso).toBe('puede_ver_resumen');
+
+    // Sí puede crear una cajera que solo vende
+    const cajera = await app.inject({
+      method: 'POST',
+      url: '/api/usuarios',
+      headers: hEnc,
+      payload: {
+        email: 'cajera@tienda.test',
+        permisos: {
+          puede_vender: true,
+          puede_agregar_mercancia: false,
+          puede_crear_usuarios: false,
+        },
+      },
+    });
+    expect(cajera.statusCode).toBe(200);
+    const hCaj = await entrarComo(
+      'cajera@tienda.test',
+      cajera.json().contrasena_temporal,
+      'cajera-segura-12',
+    );
+
+    // La cajera no puede gestionar usuarios ni crear productos
+    const lista = await app.inject({ method: 'GET', url: '/api/usuarios', headers: hCaj });
     expect(lista.statusCode).toBe(403);
+    const ahora = new Date().toISOString();
+    const prod = await app.inject({
+      method: 'POST',
+      url: '/api/sync/push',
+      headers: hCaj,
+      payload: {
+        cambios: [
+          {
+            id: 1,
+            tabla: 'productos',
+            operacion: 'upsert',
+            payload: { id: randomUUID(), nombre: 'X', creado_en: ahora, actualizado_en: ahora },
+          },
+        ],
+      },
+    });
+    expect(prod.json().resultados[0]).toMatchObject({ estado: 'permanente' });
+    expect(prod.json().resultados[0].mensaje).toMatch(/permiso/);
+
+    // La encargada no puede tocar a la propietaria ni a sí misma
+    const listaEnc = await app.inject({ method: 'GET', url: '/api/usuarios', headers: hEnc });
+    const propietaria = listaEnc
+      .json()
+      .usuarios.find((u: { es_propietario: boolean }) => u.es_propietario);
+    expect(propietaria.gestionable).toBe(false);
+    const tocar = await app.inject({
+      method: 'PATCH',
+      url: `/api/usuarios/${propietaria.id}`,
+      headers: hEnc,
+      payload: { activo: false },
+    });
+    expect(tocar.statusCode).toBe(403);
+
+    // La propietaria le quita a la encargada el permiso de crear usuarios
+    const enc = listaEnc
+      .json()
+      .usuarios.find((u: { email: string }) => u.email === 'encargada@tienda.test');
+    const quitar = await app.inject({
+      method: 'PATCH',
+      url: `/api/usuarios/${enc.id}`,
+      headers: H(),
+      payload: { permisos: { puede_crear_usuarios: false } },
+    });
+    expect(quitar.statusCode).toBe(200);
+    const yaNo = await app.inject({ method: 'GET', url: '/api/usuarios', headers: hEnc });
+    expect(yaNo.statusCode).toBe(403);
+
+    // Restablecer contraseña devuelve una temporal y obliga a cambiarla
+    const reset = await app.inject({
+      method: 'PATCH',
+      url: `/api/usuarios/${enc.id}`,
+      headers: H(),
+      payload: { restablecer_contrasena: true },
+    });
+    const h2 = await entrarComo('encargada@tienda.test', reset.json().contrasena_temporal);
+    const bloqueada = await app.inject({
+      method: 'GET',
+      url: '/api/sync/pull?desde=0',
+      headers: h2,
+    });
+    expect(bloqueada.statusCode).toBe(403);
   });
 
   it('los movimientos son append-only en la base', async () => {
@@ -419,9 +570,9 @@ d('API (integración con Postgres)', () => {
   it('bloquea la cuenta tras varios intentos fallidos', async () => {
     await app.inject({
       method: 'POST',
-      url: '/api/usuarias',
+      url: '/api/usuarios',
       headers: H(),
-      payload: { email: 'bloqueo@tienda.test', contrasena: 'contrasena-bloqueo' },
+      payload: { email: 'bloqueo@tienda.test' },
     });
     let ultimo = 0;
     for (let i = 0; i < 6; i++) {
